@@ -207,8 +207,10 @@ export function createCorePort({ storage, onPairing }) {
           message.serverNonce,
           message.proof,
         ))
-      )
-        throw new Error("Server proof rejected");
+      ) {
+        close("配对凭据验证失败；请确认正确的 Lumi 后，在两端明确重新配对。");
+        return;
+      }
       if (closed) return;
       if (needsPersistence) {
         credentialWrite = credentialPersistence = credentialPersistence
