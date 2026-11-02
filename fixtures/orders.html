@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" /><title>Lumi browser 验收订单</title
+  ><style>
+    body {
+      font: 16px system-ui;
+      max-width: 900px;
+      margin: 32px auto;
+      background: #f4f7fc;
+      color: #17243c;
+    }
+    button,
+    a,
+    input {
+      font: inherit;
+      padding: 10px;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      background: white;
+      padding: 16px;
+      border: 1px solid #ddd;
+      z-index: 2;
+    }
+    .orders {
+      height: 500px;
+      overflow: auto;
+      background: white;
+      padding: 16px;
+    }
+    .row {
+      display: flex;
+      gap: 24px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 30px;
+      border-bottom: 1px solid #ddd;
+    }
+    #cover {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: #0009;
+      z-index: 9999;
+    }
+    #cover button {
+      margin: 20vh 40vw;
+    }
+    #detail {
+      padding: 30px;
+      background: white;
+    }
+    small {
+      display: block;
+      margin: 10px;
+    }
+    footer {
+      height: 700px;
+    }
+  </style>
+  <header>
+    <h1>Lumi browser 订单验收页</h1>
+    <label>订单备注 <input aria-label="订单备注" id="note" /></label
+    ><button id="refresh">刷新列表（替换节点）</button
+    ><button id="reuse">复用节点更改订单</button
+    ><button id="occlude">显示遮挡层</button><button id="next">下一页</button>
+    <p id="page">页码：1</p>
+    <p id="saved" role="status"></p>
+  </header>
+  <main>
+    <div id="orders" class="orders" aria-label="订单列表"></div>
+    <section id="detail" hidden>
+      <h2>订单详情</h2>
+      <p id="number"></p>
+      <a href="?">返回列表</a>
+    </section>
+  </main>
+  <div id="cover"><button id="uncover">关闭遮挡</button></div>
+  <small
+    >这是无真实用户数据的本地测试夹具。目标订单第一页 ORDER-1024，第二页
+    ORDER-2024。</small
+  >
+  <footer>页面滚动终点</footer>
+  <script>
+    let page = 1;
+    const orders = document.querySelector("#orders");
+    function render() {
+      orders.replaceChildren();
+      for (let i = 1; i <= 30; i++) {
+        const id = `ORDER-${page * 1000 + i}`;
+        const row = document.createElement("article");
+        row.className = "row";
+        row.dataset.order = id;
+        const span = document.createElement("span");
+        span.textContent = id;
+        const a = document.createElement("a");
+        a.href = `?order=${id}`;
+        a.textContent = `查看 ${id}`;
+        a.addEventListener("click", (event) => {
+          event.preventDefault();
+          history.pushState({}, "", a.href);
+          showDetail(id);
+        });
+        row.append(span, a);
+        orders.append(row);
+      }
+    }
+    function showDetail(id) {
+      orders.hidden = true;
+      document.querySelector("#detail").hidden = false;
+      document.querySelector("#number").textContent = `订单号：${id}`;
+      document.title = `订单详情 ${id}`;
+    }
+    document.querySelector("#next").onclick = () => {
+      page++;
+      document.querySelector("#page").textContent = `页码：${page}`;
+      render();
+    };
+    document.querySelector("#refresh").onclick = render;
+    document.querySelector("#reuse").onclick = () => {
+      const a = orders.querySelector("a");
+      a.textContent = "查看 ORDER-REPLACED";
+      a.href = "?order=ORDER-REPLACED";
+    };
+    document.querySelector("#occlude").onclick = () =>
+      (document.querySelector("#cover").style.display = "block");
+    document.querySelector("#uncover").onclick = () =>
+      (document.querySelector("#cover").style.display = "none");
+    document.querySelector("#note").oninput = (e) =>
+      (document.querySelector("#saved").textContent =
+        `备注：${e.target.value}`);
+    render();
+    const selected = new URLSearchParams(location.search).get("order");
+    if (selected) showDetail(selected);
+  </script>
+</html>

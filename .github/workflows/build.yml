@@ -1,0 +1,56 @@
+name: Test and package
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumi-browser-extension
+          path: dist/lumi-browser-extension.zip*
+          if-no-files-found: error
+  adapter:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            arch: x64
+          - os: macos-15
+            arch: arm64
+          - os: windows-2022
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          architecture: ${{ matrix.arch }}
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build:adapter
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumi-browser-adapter-${{ runner.os }}-${{ matrix.arch }}
+          path: dist/lumi-browser-adapter-*.zip*
+          if-no-files-found: error
+          retention-days: 30

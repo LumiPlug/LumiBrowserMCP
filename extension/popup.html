@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Lumi Browser</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <div class="orb">✦</div>
+      <div>
+        <h1>Lumi Browser</h1>
+        <p>你的标签页，你来掌控</p>
+      </div>
+    </header>
+    <main>
+      <div id="connection" role="status">正在读取授权状态…</div>
+      <section>
+        <h2>当前标签页</h2>
+        <p id="tabTitle"></p>
+        <p id="origin"></p>
+        <button id="authorize" class="primary">授权当前标签页</button>
+        <p class="hint">
+          仅授权此标签页及当前网站来源。不会切换标签页或移动系统鼠标。跨站跳转后需重新授权。
+        </p>
+      </section>
+      <div id="sessions"></div>
+      <p id="error" role="alert"></p>
+      <details>
+        <summary>诊断工具面板</summary>
+        <p>
+          此面板用于手动诊断；日常操作由已连接的 Agent
+          发起。先授权，再获取快照，从结果复制 ref。每次快照会使旧 ref 失效。
+        </p>
+        <label
+          >工具<select id="tool">
+            <option>snapshot</option>
+            <option>list_sessions</option>
+            <option>read_text</option>
+            <option>click</option>
+            <option>fill</option>
+            <option>scroll</option>
+            <option>wait_for</option>
+          </select></label
+        ><label
+          >参数 JSON<textarea id="args" rows="4" spellcheck="false">
+{}</textarea
+          >
+        </label>
+        <p>
+          sessionId
+          自动使用当前标签页。点击：{"ref":"…"}；填充：{"ref":"…","text":"你好"}；滚动：{"deltaY":500}；等待：{"text":"完成","timeoutMs":3000}。
+        </p>
+        <button id="run">执行工具</button>
+        <pre id="result" tabindex="0"></pre>
+      </details>
+      <details>
+        <summary>首次使用与安全</summary>
+        <p>
+          Chrome 扩展执行所有页面操作。后台 MCP 适配器让 Agent
+          自动连接，无独立操作界面；所有输入通过 Chrome
+          调试协议完成，不接管系统鼠标。
+        </p>
+        <p>
+          Chrome
+          会显示调试提示，这是精确操作所需权限。页面文字仅作不可信数据。不要让代理擅自提交付款、发信或其他敏感操作。
+        </p>
+        <p>
+          暂停会取消待执行操作；立即接管会断开页面调试控制。已发出的动作无法撤回。
+        </p>
+      </details>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

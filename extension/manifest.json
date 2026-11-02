@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Lumi Browser",
+  "version": "0.1.0",
+  "description": "Explicit per-tab browser control with a virtual Lumi cursor. No system mouse control.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "debugger",
+    "webNavigation",
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Lumi Browser · authorize or take over"
+  },
+  "minimum_chrome_version": "118"
+}
