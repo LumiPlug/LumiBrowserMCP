@@ -9,7 +9,6 @@ import {
 } from "./core.mjs";
 import { pageOperation } from "./page.js";
 import { createCorePort, resetCorePairing } from "./transport.mjs";
-let pairingStatus = null;
 let resettingPairing = false;
 
 const sessions = new Map();
@@ -382,7 +381,9 @@ function reconcileTab(tabId) {
 }
 
 const RETRY_PREFIX = "lumi-browser-connect-";
-const RETRY_DELAYS_MINUTES = [1, 2, 5, 10, 30];
+// Chrome 118 alarms have a one-minute floor. Keep discovery inside Core's
+// 120-second explicit enrollment window; probing never launches/enables Core.
+const RETRY_DELAYS_MINUTES = [1, 1, 1, 1, 1];
 const EXHAUSTED_ALARM = `${RETRY_PREFIX}paused`;
 let retryAttempt = 0;
 let retryAt = null;
@@ -397,12 +398,14 @@ function initializeTransport() {
   if (!initialization)
     initialization = chrome.alarms
       .getAll()
-      .then((alarms) => {
+      .then(async (alarms) => {
         const paused = alarms.find((alarm) => alarm.name === EXHAUSTED_ALARM);
         if (paused) {
           retryPaused = false;
           retryAttempt = RETRY_DELAYS_MINUTES.length;
-          retryAt = paused.scheduledTime;
+          retryAt = Math.min(paused.scheduledTime, Date.now() + 60000);
+          if (retryAt < paused.scheduledTime)
+            await chrome.alarms.create(paused.name, { when: retryAt });
           retryAlarm = EXHAUSTED_ALARM;
           return;
         }
@@ -411,7 +414,9 @@ function initializeTransport() {
           .sort((a, b) => b.scheduledTime - a.scheduledTime)[0];
         if (pending) {
           retryAttempt = Number(pending.name.slice(RETRY_PREFIX.length));
-          retryAt = pending.scheduledTime;
+          retryAt = Math.min(pending.scheduledTime, Date.now() + 60000);
+          if (retryAt < pending.scheduledTime)
+            await chrome.alarms.create(pending.name, { when: retryAt });
           retryAlarm = pending.name;
         }
       })
@@ -431,9 +436,9 @@ async function clearRetryAlarms(expectedPort = null) {
 function scheduleReconnect() {
   if (retryAttempt >= RETRY_DELAYS_MINUTES.length) {
     retryPaused = false;
-    retryAt = Date.now() + 30 * 60000;
+    retryAt = Date.now() + 60000;
     retryAlarm = EXHAUSTED_ALARM;
-    // Once fast retries are exhausted, probe communication only every 30 minutes.
+    // Keep one-minute discovery after the initial attempts, without process spawn.
     // This never enables Core, restores refs or authorizes a page.
     void chrome.alarms
       .create(EXHAUSTED_ALARM, { when: retryAt })
@@ -449,7 +454,6 @@ function scheduleReconnect() {
   });
 }
 function transportFailed(reason) {
-  pairingStatus = null;
   for (const request of [...pagePolicyRequests.values()])
     request.finish({
       code: "disconnected",
@@ -512,7 +516,6 @@ function ensureConnection({ resetBudget = false } = {}) {
 function transportStatus() {
   return {
     sessions: localList(),
-    ...(pairingStatus || {}),
     autoConsent,
     hostGranted,
     policyReady: !!policy,
@@ -639,12 +642,7 @@ function errorJSON(e) {
 }
 function openCorePort() {
   if (corePort) return;
-  const port = createCorePort({
-    storage: chrome.storage.local,
-    onPairing: (status) => {
-      if (corePort === port) pairingStatus = status;
-    },
-  });
+  const port = createCorePort({ storage: chrome.storage.local });
   corePort = port;
   coreReady = false;
   handshakeAlarm = `lumi-browser-handshake-${crypto.randomUUID()}`;
@@ -1163,18 +1161,11 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         const oldPort = corePort;
         if (oldPort) await oldPort.resetPairing();
         else await resetCorePairing(chrome.storage.local);
-        pairingStatus = null;
         transportError = "扩展旧凭据已清除；还需在 Lumi 中确认重新配对。";
       } finally {
         resettingPairing = false;
       }
       await ensureConnection({ resetBudget: true });
-      return transportStatus();
-    }
-    if (message.type === "confirm_pairing") {
-      if (!corePort || pairingStatus?.pairingId !== message.pairingId)
-        throw new LumiError("pairing_changed", "配对请求已变化。");
-      corePort.confirmPairing(message.pairingId);
       return transportStatus();
     }
     if (message.type === "set_page_allowed") return setPageAllowed(message);

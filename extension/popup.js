@@ -34,32 +34,16 @@ async function refresh(probe = false) {
     !allowed || !status.autoConsent || !status.hostGranted || !!held;
   $("toggle").textContent = nextAllowed ? "允许此页" : "禁止此页";
   $("toggle").disabled = busy || !ready || !currentUrl;
-  if (
-    !ready &&
-    !status.pairingId &&
-    /配对凭据|重新配对/.test(status.transportError || "")
-  ) {
+  if (!ready && /配对凭据|重新配对/.test(status.transportError || "")) {
     $("toggle").textContent = "重新配对";
     $("toggle").disabled = busy;
   }
-  if (
-    !ready &&
-    status.pairingId &&
-    /^[0-9]{6}$/.test(status.pairingCode || "")
-  ) {
-    $("toggle").textContent = status.pairingConfirmed
-      ? "等待 Lumi 确认"
-      : "核对一致，确认配对";
-    $("toggle").disabled = busy || !!status.pairingConfirmed;
-  }
   $("connection").textContent = !ready
-    ? /^[0-9]{6}$/.test(status.pairingCode || "")
-      ? `配对码 ${status.pairingCode} · 请在 Lumi 核对`
-      : status.connecting
-        ? "正在连接 Lumi…"
-        : /配对凭据/.test(status.transportError || "")
-          ? "Lumi 未连接 · 配对凭据不匹配"
-          : "Lumi 未连接"
+    ? status.connecting
+      ? "正在连接 Lumi…"
+      : /配对凭据/.test(status.transportError || "")
+        ? "Lumi 未连接 · 配对凭据不匹配"
+        : "Lumi 未连接"
     : !currentUrl
       ? "Lumi 已连接 · 此页不支持"
       : held
@@ -76,12 +60,11 @@ $("toggle").addEventListener("click", async () => {
   if (
     !busy &&
     !lastStatus?.connected &&
-    !lastStatus?.pairingId &&
     /配对凭据|重新配对/.test(lastStatus?.transportError || "")
   ) {
     if (
       !window.confirm(
-        "清除此扩展的旧配对凭据并断开？还需在 Lumi 中确认重新配对，之后必须在两端重新核对短码。",
+        "清除此扩展的旧配对凭据并断开？还需在 Lumi 中确认重新配对，之后会重新首次信任，无法识别本机恶意冒充。",
       )
     )
       return;
@@ -90,31 +73,6 @@ $("toggle").addEventListener("click", async () => {
     showError();
     try {
       await request({ type: "reset_pairing", confirmed: true });
-    } catch (error) {
-      showError(error.message);
-    } finally {
-      busy = false;
-      try {
-        await refresh();
-      } catch {
-        $("toggle").disabled = true;
-      }
-    }
-    return;
-  }
-  if (
-    !busy &&
-    !lastStatus?.connected &&
-    lastStatus?.pairingId &&
-    !lastStatus.pairingConfirmed &&
-    /^[0-9]{6}$/.test(lastStatus.pairingCode || "")
-  ) {
-    const pairingId = lastStatus.pairingId;
-    busy = true;
-    $("toggle").disabled = true;
-    showError();
-    try {
-      await request({ type: "confirm_pairing", pairingId });
     } catch (error) {
       showError(error.message);
     } finally {

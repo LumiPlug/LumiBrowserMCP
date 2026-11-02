@@ -58,7 +58,6 @@ async function popup({
           return { result: structuredClone(status) };
         if (actionGate) await actionGate;
         if (actionError) return { error: { message: actionError } };
-        if (message.type === "confirm_pairing") status.pairingConfirmed = true;
         if (message.type === "set_page_allowed") {
           const target = normalizePolicyUrl(message.url);
           status.blockedUrls = message.allowed
@@ -270,75 +269,44 @@ test("held current tab offers explicit allow rather than silently clearing a tak
   assert.ok(ui.messages.every((m) => m.type === "status"));
 });
 
-test("pairing code is shown only while disconnected and cannot enable page operations", async () => {
-  const ui = await popup({
-    status: { connected: false, policyReady: false, pairingCode: "482917" },
-  });
-  assert.match(ui.element("connection").textContent, /482917/);
-  assert.equal(ui.element("toggle").disabled, true);
-  assert.ok(ui.messages.every((m) => m.type === "status"));
-  ui.status.connected = true;
-  ui.status.policyReady = true;
-  await ui.poll();
-  assert.doesNotMatch(ui.element("connection").textContent, /482917/);
-  assert.equal(ui.element("toggle").disabled, false);
+test("legacy pairing status never displays a code or confirmation UI", async () => {
+  for (const connected of [false, true]) {
+    for (const pairingConfirmed of [false, true]) {
+      const ui = await popup({
+        status: {
+          connected,
+          policyReady: connected,
+          pairingId: "legacy-pair",
+          pairingCode: "482917",
+          pairingConfirmed,
+        },
+      });
+      assert.doesNotMatch(
+        ui.element("connection").textContent,
+        /482917|配对码|核对/,
+      );
+      assert.doesNotMatch(
+        ui.element("toggle").textContent,
+        /确认配对|等待 Lumi 确认/,
+      );
+      assert.equal(ui.element("toggle").disabled, !connected);
+      assert.equal(ui.permissionRequests.length, 0);
+      assert.ok(ui.messages.every((message) => message.type === "status"));
+      await ui.poll();
+      assert.ok(ui.messages.every((message) => message.type === "status"));
+    }
+  }
 });
 
-test("absent pairing code does not invent a pairing-success or code display", async () => {
-  const ui = await popup({
-    status: { connected: false, policyReady: false, pairingCode: null },
-  });
+test("popup source does not retain the removed pairing confirmation API", async () => {
+  const source = await readFile(
+    new URL("../extension/popup.js", import.meta.url),
+    "utf8",
+  );
   assert.doesNotMatch(
-    ui.element("connection").textContent,
-    /null|undefined|\d{6}/,
+    source,
+    /confirm_pairing|pairingCode|pairingConfirmed|pairingId/,
   );
-  assert.equal(ui.element("toggle").disabled, true);
-});
-
-test("pairing confirmation requires the explicit popup click and does not grant website access", async () => {
-  const ui = await popup({
-    status: {
-      connected: false,
-      policyReady: false,
-      pairingId: "pairing-7",
-      pairingCode: "482917",
-      pairingConfirmed: false,
-    },
-  });
-  assert.match(ui.element("toggle").textContent, /确认配对/);
-  assert.equal(
-    ui.messages.some((message) => message.type === "confirm_pairing"),
-    false,
-  );
-  await ui.click();
-  assert.deepEqual(
-    ui.messages.find((message) => message.type === "confirm_pairing"),
-    { type: "confirm_pairing", pairingId: "pairing-7" },
-  );
-  assert.equal(ui.permissionRequests.length, 0);
-  assert.equal(
-    ui.messages.some((message) => message.type === "set_page_allowed"),
-    false,
-  );
-  assert.equal(ui.element("toggle").disabled, true);
-  assert.match(ui.element("toggle").textContent, /等待 Lumi 确认/);
-  assert.equal(ui.status.connected, false);
-});
-
-test("expired or rejected pairing stays unconnected and shows the error", async () => {
-  const ui = await popup({
-    status: {
-      connected: false,
-      policyReady: false,
-      pairingId: "expired",
-      pairingCode: "482917",
-    },
-    actionError: "配对请求已过期",
-  });
-  await ui.click();
-  assert.match(ui.element("error").textContent, /已过期/);
-  assert.equal(ui.status.connected, false);
-  assert.equal(ui.permissionRequests.length, 0);
 });
 
 test("rejecting reset confirmation preserves pairing and sends no mutation", async () => {
@@ -354,8 +322,9 @@ test("rejecting reset confirmation preserves pairing and sends no mutation", asy
   await ui.click();
   assert.equal(ui.confirmations.length, 1);
   assert.match(ui.confirmations[0], /清除.*配对凭据/);
-  assert.match(ui.confirmations[0], /Lumi.*重新配对/);
-  assert.match(ui.confirmations[0], /两端.*短码/);
+  assert.match(ui.confirmations[0], /首次信任/);
+  assert.match(ui.confirmations[0], /本机/);
+  assert.doesNotMatch(ui.confirmations[0], /短码|核对/);
   assert.ok(ui.messages.every((message) => message.type === "status"));
   assert.equal(ui.permissionRequests.length, 0);
 });
@@ -379,26 +348,18 @@ test("explicit reset confirmation sends only confirmed reset without granting we
   assert.equal(ui.status.connected, false);
 });
 
-test("connected status and an active pairing offer do not expose credential reset", async () => {
-  for (const status of [
-    { connected: true, transportError: "请重新配对" },
-    {
-      connected: false,
-      policyReady: false,
-      pairingId: "pair-8",
-      pairingCode: "482917",
-      transportError: "请重新配对",
-    },
-  ]) {
-    const ui = await popup({ status, confirm: true });
-    assert.notEqual(ui.element("toggle").textContent, "重新配对");
-    await ui.click();
-    assert.equal(ui.confirmations.length, 0);
-    assert.equal(
-      ui.messages.some((message) => message.type === "reset_pairing"),
-      false,
-    );
-  }
+test("connected status does not expose credential reset even with a stale error", async () => {
+  const ui = await popup({
+    status: { connected: true, transportError: "请重新配对" },
+    confirm: true,
+  });
+  assert.notEqual(ui.element("toggle").textContent, "重新配对");
+  await ui.click();
+  assert.equal(ui.confirmations.length, 0);
+  assert.equal(
+    ui.messages.some((message) => message.type === "reset_pairing"),
+    false,
+  );
 });
 
 test("ordinary disconnected status does not expose reset or silently clear credentials", async () => {

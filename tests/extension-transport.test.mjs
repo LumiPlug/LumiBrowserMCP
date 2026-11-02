@@ -167,7 +167,7 @@ test("worker startup establishes communication, but ready handshake and tab cons
   assert.equal(env.attached.length, 0);
 });
 
-test("missing host backs off to low-frequency probes; only popup opening bypasses delay", async () => {
+test("disconnected Core is probed within its enrollment window without opening popup", async () => {
   const env = await setup({ fail: true });
   assert.equal(env.attempts(), 1);
   for (let i = 1; i <= 5; i++) {
@@ -176,13 +176,17 @@ test("missing host backs off to low-frequency probes; only popup opening bypasse
     assert.ok(
       env.scheduled.get(`lumi-browser-connect-${i}`).scheduledTime > Date.now(),
     );
+    assert.ok(
+      env.scheduled.get(`lumi-browser-connect-${i}`).scheduledTime <=
+        Date.now() + 60000,
+    );
     await env.fire(`lumi-browser-connect-${i}`);
   }
   assert.equal(env.attempts(), 6);
   assert.equal((await env.send({ type: "status" })).result.retry.paused, false);
   assert.ok(
-    env.scheduled.get("lumi-browser-connect-paused").scheduledTime >=
-      Date.now() + 29 * 60000,
+    env.scheduled.get("lumi-browser-connect-paused").scheduledTime <=
+      Date.now() + 60000,
   );
   await env.fire("lumi-browser-connect-paused");
   assert.equal(env.attempts(), 7);
@@ -278,4 +282,25 @@ test("late callbacks from an old secure connection cannot mark or break the new 
   first.onDisconnect.fire();
   assert.equal((await env.send({ type: "status" })).result.connected, true);
   assert.equal(env.attached.length, 0);
+});
+
+test("upgrading long retry alarms clamps discovery to one minute", async () => {
+  for (const name of [
+    "lumi-browser-connect-paused",
+    "lumi-browser-connect-4",
+  ]) {
+    const env = await setup({
+      fail: true,
+      alarms: [{ name, scheduledTime: Date.now() + 30 * 60000 }],
+    });
+    assert.equal(env.attempts(), 0);
+    assert.ok(env.scheduled.get(name).scheduledTime <= Date.now() + 60000);
+    await env.fire(name);
+    assert.equal(env.attempts(), 1);
+    assert.equal(
+      env.attached.length,
+      0,
+      "A communication probe cannot authorize or enable Core",
+    );
+  }
 });

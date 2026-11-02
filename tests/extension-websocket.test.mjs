@@ -11,9 +11,10 @@ import {
   createSecureChannel,
 } from "../extension/security.mjs";
 async function until(check) {
-  for (let n = 0; n < 2000; n++) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
     if (check()) return;
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 1));
   }
   throw Error("Synthetic handshake did not settle");
 }
@@ -106,34 +107,31 @@ async function authenticate(h, secret) {
   );
   return channel;
 }
-test("first pairing derives matching local code and requires explicit matching approval before persistence", async () => {
+test("TOFU enrollment auto-accepts derived candidate but persists only after server proof", async () => {
   const h = harness();
-  await until(() => h.socket.sent.some((m) => m.type === "pair_commit"));
+  await until(() => h.socket.sent.some((m) => m.type === "enroll_commit"));
   const server = await createPairingHello("server");
   h.socket.fire({
-    type: "pair_commit",
+    type: "enroll_commit",
     commitment: await commitPairingHello(server.hello, "server"),
   });
-  await until(() => h.socket.sent.some((m) => m.type === "pair_hello"));
-  const client = h.socket.sent.find((m) => m.type === "pair_hello").hello;
+  await until(() => h.socket.sent.some((m) => m.type === "enroll_hello"));
+  const client = h.socket.sent.find((m) => m.type === "enroll_hello").hello;
   const derived = await finishPairing(server.state, client);
   h.socket.fire({
-    type: "pair_offer",
+    type: "enroll_offer",
     hello: server.hello,
-    pairingId: derived.pairingId,
+    enrollmentId: derived.pairingId,
     expiresAt: Date.now() + 60000,
   });
-  await until(() => h.pairing.some((p) => p?.pairingCode));
-  assert.equal(h.pairing.at(-1).pairingCode, derived.sas);
+  await until(() => h.socket.sent.some((m) => m.type === "enroll_accept"));
   assert.equal(h.writes.length, 0);
-  assert.throws(() => h.port.confirmPairing("old"), /变化/);
-  h.port.confirmPairing(derived.pairingId);
-  h.socket.fire({ type: "pair_complete", pairingId: derived.pairingId });
+  h.socket.fire({ type: "enroll_complete", enrollmentId: derived.pairingId });
   await until(() => h.socket.sent.some((m) => m.type === "auth_hello"));
   assert.equal(
     h.writes.length,
     0,
-    "Public pair_complete alone must never persist credentials",
+    "Public enroll_complete alone must never persist credentials",
   );
   const channel = await authenticate(h, derived.sharedSecret);
   assert.equal(h.writes[0].lumiCorePairing.secret, derived.sharedSecret);
@@ -148,10 +146,10 @@ test("first pairing derives matching local code and requires explicit matching a
   h.port.disconnect();
   channel.close();
 });
-test("unapproved completion and plaintext ready cannot authorize a connection", async () => {
+test("unsolicited enrollment completion and plaintext ready cannot authorize a connection", async () => {
   const h = harness();
   await until(() => h.socket.sent.length);
-  h.socket.fire({ type: "pair_complete", pairingId: "forged" });
+  h.socket.fire({ type: "enroll_complete", enrollmentId: "forged" });
   await until(() => h.disconnected());
   assert.equal(h.writes.length, 0);
   assert.equal(h.received.length, 0);
@@ -206,24 +204,24 @@ test("wrong server proof and trusted-storage failure stop before any client proo
 
 test("pre-auth flood and commitment substitution fail closed without credentials", async () => {
   const h = harness();
-  await until(() => h.socket.sent.some((m) => m.type === "pair_commit"));
+  await until(() => h.socket.sent.some((m) => m.type === "enroll_commit"));
   const server = await createPairingHello("server"),
     other = await createPairingHello("server");
   h.socket.fire({
-    type: "pair_commit",
+    type: "enroll_commit",
     commitment: await commitPairingHello(server.hello, "server"),
   });
-  await until(() => h.socket.sent.some((m) => m.type === "pair_hello"));
+  await until(() => h.socket.sent.some((m) => m.type === "enroll_hello"));
   h.socket.fire({
-    type: "pair_offer",
+    type: "enroll_offer",
     hello: other.hello,
-    pairingId: createNonce(),
+    enrollmentId: createNonce(),
     expiresAt: Date.now() + 60000,
   });
   await until(() => h.disconnected());
   assert.equal(h.writes.length, 0);
   const flooded = harness();
-  flooded.socket.fire({ type: "pair_commit", commitment: "x".repeat(5000) });
+  flooded.socket.fire({ type: "enroll_commit", commitment: "x".repeat(5000) });
   assert.equal(flooded.disconnected(), 1);
   assert.equal(flooded.writes.length, 0);
 });
@@ -234,26 +232,25 @@ test("explicit reset disconnects and waits for in-flight credential persistence 
     release = resolve;
   });
   const h = harness({ saveGate });
-  await until(() => h.socket.sent.some((m) => m.type === "pair_commit"));
+  await until(() => h.socket.sent.some((m) => m.type === "enroll_commit"));
   const server = await createPairingHello("server");
   h.socket.fire({
-    type: "pair_commit",
+    type: "enroll_commit",
     commitment: await commitPairingHello(server.hello, "server"),
   });
-  await until(() => h.socket.sent.some((m) => m.type === "pair_hello"));
+  await until(() => h.socket.sent.some((m) => m.type === "enroll_hello"));
   const derived = await finishPairing(
     server.state,
-    h.socket.sent.find((m) => m.type === "pair_hello").hello,
+    h.socket.sent.find((m) => m.type === "enroll_hello").hello,
   );
   h.socket.fire({
-    type: "pair_offer",
+    type: "enroll_offer",
     hello: server.hello,
-    pairingId: derived.pairingId,
+    enrollmentId: derived.pairingId,
     expiresAt: Date.now() + 60000,
   });
-  await until(() => h.pairing.some((p) => p?.pairingCode));
-  h.port.confirmPairing(derived.pairingId);
-  h.socket.fire({ type: "pair_complete", pairingId: derived.pairingId });
+  await until(() => h.socket.sent.some((m) => m.type === "enroll_accept"));
+  h.socket.fire({ type: "enroll_complete", enrollmentId: derived.pairingId });
   await until(() => h.socket.sent.some((m) => m.type === "auth_hello"));
   const nonce = createNonce(),
     clientNonce = h.socket.sent.find(
@@ -275,4 +272,33 @@ test("explicit reset disconnects and waits for in-flight credential persistence 
     h.socket.sent.some((m) => m.type === "auth_proof"),
     false,
   );
+});
+
+test("pinned identity never downgrades to enrollment and old approval wire is rejected", async () => {
+  const h = harness({
+    saved: { secret: createNonce(), pairingId: createNonce() },
+  });
+  await until(() => h.socket.sent.some((m) => m.type === "auth_hello"));
+  h.socket.fire({ type: "auth_error", code: "pairing_required" });
+  await until(() => h.disconnected());
+  assert.equal(h.removed(), 0);
+  assert.equal(h.writes.length, 0);
+  assert.equal(
+    h.socket.sent.some((m) => m.type.startsWith("enroll_")),
+    false,
+  );
+  for (const type of ["pair_commit", "pair_offer", "pair_complete"]) {
+    const other = harness();
+    await until(() =>
+      other.socket.sent.some((m) => m.type === "enroll_commit"),
+    );
+    other.socket.fire({
+      type,
+      commitment: createNonce(),
+      pairingId: createNonce(),
+    });
+    await until(() => other.disconnected());
+    assert.equal(other.writes.length, 0);
+    assert.equal(other.port.confirmPairing, undefined);
+  }
 });

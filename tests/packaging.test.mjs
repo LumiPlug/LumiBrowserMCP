@@ -197,7 +197,7 @@ test("0.5 connects only to fixed Core loopback without Native Messaging permissi
   const manifest = JSON.parse(
     await readFile(path.join(root, "extension/manifest.json"), "utf8"),
   );
-  assert.equal(manifest.version, "0.5.0");
+  assert.equal(manifest.version, "0.5.1");
   assert.ok(!manifest.permissions.includes("nativeMessaging"));
   assert.equal(
     manifest.content_security_policy.extension_pages,

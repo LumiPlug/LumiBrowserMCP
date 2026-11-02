@@ -31,7 +31,7 @@ const event = () => {
 };
 // One fixed loopback socket, no process launch and no bearer token in URLs/logs.
 // All application data, including ready/policy, is authenticated and encrypted.
-export function createCorePort({ storage, onPairing }) {
+export function createCorePort({ storage }) {
   const socket = new WebSocket(CORE_URL);
   let closed = false,
     state = "opening",
@@ -72,24 +72,6 @@ export function createCorePort({ storage, onPairing }) {
     disconnect() {
       close("Lumi 连接已关闭。");
     },
-    confirmPairing(pairingId) {
-      if (
-        closed ||
-        state !== "pairing" ||
-        !pairing ||
-        pairing.id !== pairingId ||
-        Date.now() >= pairing.expiresAt ||
-        pairing.confirmed
-      )
-        throw new Error("配对请求已变化或过期，请重新打开扩展。");
-      pairing.confirmed = true;
-      send({ type: "pair_confirm", pairingId });
-      onPairing({
-        pairingCode: pairing.sas,
-        pairingId,
-        pairingConfirmed: true,
-      });
-    },
   };
   async function drain() {
     if (draining) return;
@@ -112,7 +94,6 @@ export function createCorePort({ storage, onPairing }) {
     port.error = message;
     channel?.close();
     outgoing.length = 0;
-    onPairing(null);
     port.onDisconnect.fire();
     socket.close();
   }
@@ -139,20 +120,20 @@ export function createCorePort({ storage, onPairing }) {
     if (message.type === "auth_error") {
       close(
         message.code === "pairing_required"
-          ? "配对凭据不匹配；请在扩展与 Lumi 两端明确重新配对，然后重新核对短码。"
+          ? "配对凭据不匹配；请在扩展与 Lumi 两端明确重新配对；之后按首次信任自动登记。"
           : "Lumi 暂未接受连接，请检查连接设置。",
       );
       return;
     }
-    if (state === "commit" && message.type === "pair_commit") {
+    if (state === "commit" && message.type === "enroll_commit") {
       if (!/^[A-Za-z0-9_-]{43}$/.test(message.commitment || ""))
         throw new Error("Invalid pairing commitment");
       pairing.serverCommitment = message.commitment;
       state = "offer";
-      send({ type: "pair_hello", hello: pairing.hello });
+      send({ type: "enroll_hello", hello: pairing.hello });
       return;
     }
-    if (state === "offer" && message.type === "pair_offer") {
+    if (state === "offer" && message.type === "enroll_offer") {
       if (
         !(await verifyPairingCommitment(
           message.hello,
@@ -164,7 +145,7 @@ export function createCorePort({ storage, onPairing }) {
       const derived = await finishPairing(pairing.state, message.hello);
       if (closed) return;
       if (
-        derived.pairingId !== message.pairingId ||
+        derived.pairingId !== message.enrollmentId ||
         !Number.isSafeInteger(message.expiresAt) ||
         message.expiresAt <= Date.now() ||
         message.expiresAt > Date.now() + 5 * 60000
@@ -173,29 +154,25 @@ export function createCorePort({ storage, onPairing }) {
       pairing = {
         id: derived.pairingId,
         secret: derived.sharedSecret,
-        sas: derived.sas,
         expiresAt: message.expiresAt,
-        confirmed: false,
+        accepted: true,
       };
       state = "pairing";
-      onPairing({
-        pairingCode: pairing.sas,
-        pairingId: pairing.id,
-        pairingConfirmed: false,
-      });
+      // Trust on first use: this proves key continuity, not the identity of
+      // the first local peer. Core restricts enrollment to its explicit window.
+      send({ type: "enroll_accept", enrollmentId: pairing.id });
       return;
     }
-    if (state === "pairing" && message.type === "pair_complete") {
+    if (state === "pairing" && message.type === "enroll_complete") {
       if (
-        !pairing.confirmed ||
-        pairing.id !== message.pairingId ||
+        !pairing.accepted ||
+        pairing.id !== message.enrollmentId ||
         Date.now() >= pairing.expiresAt
       )
-        throw new Error("Unconfirmed pairing");
+        throw new Error("Unaccepted pairing");
       credential = { secret: pairing.secret, pairingId: pairing.id };
       needsPersistence = true;
       if (closed) return;
-      onPairing(null);
       await authenticate();
       return;
     }
@@ -275,7 +252,7 @@ export function createCorePort({ storage, onPairing }) {
           const commitment = await commitPairingHello(hello.hello, "client");
           if (closed) return;
           state = "commit";
-          send({ type: "pair_commit", commitment });
+          send({ type: "enroll_commit", commitment });
         }
       })
       .catch(() => close("无法建立受保护的 Lumi 连接。"));

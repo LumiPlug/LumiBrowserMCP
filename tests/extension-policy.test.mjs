@@ -874,3 +874,14 @@ test("pairing reset requires explicit confirmation while disconnected and preser
   );
   assert.equal(result.result.policyReady, false);
 });
+
+test("removed manual pairing confirmation API cannot grant authority", async () => {
+  const env = await setup({ consent: false });
+  const result = await env.send({
+    type: "confirm_pairing",
+    pairingId: "obsolete",
+  });
+  assert.ok(result.error);
+  assert.equal((await env.status()).connected, false);
+  assert.equal(env.local.lumiAutoConsent, false);
+});
