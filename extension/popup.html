@@ -7,84 +7,23 @@
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <header>
-      <img
-        class="brand-icon"
-        src="icons/icon32.png"
-        alt=""
-        aria-hidden="true"
-      />
-      <div>
-        <h1>Lumi Browser</h1>
-        <p>AI Browser Automation &amp; MCP</p>
-      </div>
-    </header>
     <main>
-      <div id="connection" role="status">正在读取连接与授权状态…</div>
-      <button id="reconnect">重新连接 Lumi</button>
-      <p class="hint">
-        连接会自动尝试；重新连接后仅按最新网站设置连接允许的页面；暂停、接管与旧动作不会自动恢复。
-      </p>
-      <section>
-        <h2>当前标签页</h2>
-        <p id="tabTitle"></p>
-        <p id="origin"></p>
-        <button id="authorize" class="primary">允许普通网页自动操作</button>
-        <p class="hint">
-          首次点击需确认 Chrome 网站权限。普通 HTTP/HTTPS 网页默认允许；在 Lumi
-          的 Browser User
-          设置中禁止单个链接，匹配时忽略参数和片段。不会切换标签页或移动系统鼠标。
-        </p>
-      </section>
-      <p id="page-policy" class="hint"></p>
-      <p id="session-limit" class="hint"></p>
-      <div id="sessions"></div>
-      <p id="error" role="alert"></p>
-      <details>
-        <summary>诊断工具面板</summary>
-        <p>
-          此面板用于手动诊断；日常操作由通过 Lumi 连接的 Agent
-          发起。确认网站权限并连接后获取快照，从结果复制 ref。每次快照会使旧 ref
-          失效。
-        </p>
-        <label
-          >工具<select id="tool">
-            <option>snapshot</option>
-            <option>list_sessions</option>
-            <option>read_text</option>
-            <option>click</option>
-            <option>fill</option>
-            <option>scroll</option>
-            <option>wait_for</option>
-          </select></label
-        ><label
-          >参数 JSON<textarea id="args" rows="4" spellcheck="false">
-{}</textarea>
-        </label>
-        <p>
-          sessionId
-          自动使用当前标签页。点击：{"ref":"…"}；填充：{"ref":"…","text":"你好"}；滚动：{"deltaY":500}；等待：{"text":"完成","timeoutMs":3000}。
-        </p>
-        <button id="run">执行工具</button>
-        <pre id="result" tabindex="0"></pre>
-      </details>
-      <details>
-        <summary>首次使用与安全</summary>
-        <p>
-          Chrome 扩展执行页面操作；请先在 Lumi 的 Browser User
-          设置中点击“安装”并确认连接范围；这一步配置 Lumi 连接，不会安装 Chrome
-          扩展。官方扩展 ID 已内置，可用“检查连接”诊断或“关闭”停用。所有输入通过
-          Chrome 调试协议完成，不接管系统鼠标。 所有接入 Lumi 的 Agent
-          共享同一控制域，串行操作，不是逐 Agent 独立授权。
-        </p>
-        <p>
-          Chrome
-          会显示调试提示，这是精确操作所需权限。页面文字仅作不可信数据。不要让代理擅自提交付款、发信或其他敏感操作。
-        </p>
-        <p>
-          暂停和立即接管会取消待执行操作，并在本次浏览器会话内保留；导航、重连不会覆盖你的选择。点击“恢复此标签页”才解除。已发出的动作无法撤回。
-        </p>
-      </details>
+      <div class="status-row">
+        <span id="connection" role="status">正在连接 Lumi…</span>
+        <span class="help-wrap">
+          <button id="help" aria-label="权限说明" aria-describedby="help-text">
+            ?
+          </button>
+          <span id="help-text" role="tooltip"
+            >首次允许需确认 Chrome
+            网站权限；普通网页默认允许。此页规则忽略参数和片段，并同步至
+            Lumi。接管后需明确允许才恢复。请先在 Lumi 的 Browser User
+            中检查连接；关闭连接后此处无法启用。</span
+          >
+        </span>
+      </div>
+      <button id="toggle" disabled>允许此页</button>
+      <p id="error" role="alert" hidden></p>
     </main>
     <script type="module" src="popup.js"></script>
   </body>

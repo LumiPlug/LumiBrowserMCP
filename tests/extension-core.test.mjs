@@ -6,7 +6,7 @@ import {
   enqueue,
   invalidate,
   assertLive,
-  validateNativeRequest,
+  validateRemoteRequest,
 } from "../extension/core.mjs";
 const session = () => ({ state: "active", epoch: 0, queue: Promise.resolve() });
 test("only exact HTTP(S) origins are accepted", () => {
@@ -71,12 +71,12 @@ test("revocation rejects future work", async () => {
 });
 
 test("native tool validation bounds names, values and encoded payload size", () => {
-  assert.throws(() => validateNativeRequest({ tool: "x".repeat(33) }), {
+  assert.throws(() => validateRemoteRequest({ tool: "x".repeat(33) }), {
     code: "unknown_tool",
   });
   assert.throws(
     () =>
-      validateNativeRequest({
+      validateRemoteRequest({
         tool: "fill",
         args: { sessionId: "s", ref: "r", text: "x".repeat(100001) },
       }),
@@ -84,7 +84,7 @@ test("native tool validation bounds names, values and encoded payload size", () 
   );
   assert.throws(
     () =>
-      validateNativeRequest({
+      validateRemoteRequest({
         tool: "fill",
         args: { sessionId: "s", ref: "r", text: "\ud800".repeat(100000) },
       }),
@@ -92,14 +92,14 @@ test("native tool validation bounds names, values and encoded payload size", () 
   );
   assert.throws(
     () =>
-      validateNativeRequest({
+      validateRemoteRequest({
         tool: "click",
         args: { sessionId: "s", ref: "r".repeat(257) },
       }),
     { code: "invalid_argument" },
   );
   assert.deepEqual(
-    validateNativeRequest({ tool: "list_sessions", args: {} }),
+    validateRemoteRequest({ tool: "list_sessions", args: {} }),
     {},
   );
 });

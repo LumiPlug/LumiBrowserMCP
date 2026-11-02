@@ -5,23 +5,182 @@ import {
   assertLive,
   enqueue,
   invalidate,
-  validateNativeRequest,
+  validateRemoteRequest,
 } from "./core.mjs";
 import { pageOperation } from "./page.js";
+import { createCorePort, resetCorePairing } from "./transport.mjs";
+let pairingStatus = null;
+let resettingPairing = false;
 
 const sessions = new Map();
-let nativePort = null;
-let nativeReady = false;
+let corePort = null;
+let coreReady = false;
 let handshakeAlarm = null;
 let transportEpoch = 0;
 let transportError = "";
-const nativeRequests = new Map();
+const remoteRequests = new Map();
+const pagePolicyRequests = new Map();
+function policyRpc(type, args) {
+  if (!corePort || !coreReady || !policy)
+    return Promise.reject(
+      new LumiError("not_connected", "Lumi 未连接，无法同步此页规则。"),
+    );
+  if (pagePolicyRequests.size >= 8)
+    return Promise.reject(new LumiError("busy", "请等待正在同步的规则。"));
+  const port = corePort,
+    id = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pagePolicyRequests.delete(id);
+      reject(
+        new LumiError(
+          "policy_timeout",
+          "Lumi 未确认规则，请检查连接；不会自动重试此次修改。",
+        ),
+      );
+    }, 20000);
+    const finish = (error, result) => {
+      clearTimeout(timer);
+      pagePolicyRequests.delete(id);
+      if (error)
+        reject(
+          new LumiError(
+            error.code || "policy_error",
+            error.message || "规则同步失败。",
+          ),
+        );
+      else resolve(result);
+    };
+    pagePolicyRequests.set(id, { port, type: `${type}_result`, finish });
+    try {
+      postCore(port, { type, id, ...args });
+    } catch (error) {
+      finish(error);
+    }
+  });
+}
+async function setPageAllowed(message) {
+  if (
+    !Number.isInteger(message.tabId) ||
+    typeof message.allowed !== "boolean" ||
+    typeof message.url !== "string"
+  )
+    throw new LumiError("invalid_argument", "无效的页面规则。");
+  const url = normalizePolicyUrl(message.url);
+  if (url.length > 2048)
+    throw new LumiError("invalid_argument", "页面链接过长。");
+  const current = await chrome.tabs.get(message.tabId);
+  if (normalizePolicyUrl(current.url) !== url)
+    throw new LumiError("navigation_changed", "页面已变化，请重新打开扩展。");
+  if (!coreReady || !policy)
+    throw new LumiError("not_connected", "Lumi 未连接。");
+  const port = corePort,
+    epoch = policy.epoch,
+    holdRevision = holdRevisions.get(message.tabId) || 0;
+  if (!message.allowed) await holdTabId(message.tabId, "taken_over");
+  if (
+    message.allowed &&
+    !(await chrome.permissions.contains({ origins: HOST_ORIGINS }))
+  )
+    throw new LumiError("permission_required", "请先确认 Chrome 网站权限。");
+  const stillCurrent = async () => {
+    const tab = await chrome.tabs.get(message.tabId);
+    if (
+      corePort !== port ||
+      !coreReady ||
+      policy?.epoch !== epoch ||
+      normalizePolicyUrl(tab.url) !== url
+    )
+      throw new LumiError("policy_changed", "页面或连接已变化，请重新操作。");
+  };
+  await stillCurrent();
+  const context = await policyRpc("page_context", {
+    tabId: message.tabId,
+    url,
+    title: (current.title || "").slice(0, 1024),
+    policyEpoch: epoch,
+  });
+  if (
+    !context ||
+    typeof context.contextId !== "string" ||
+    context.contextId.length > 128 ||
+    !context.contextId ||
+    context.url !== url ||
+    context.policyEpoch !== epoch
+  )
+    throw new LumiError("invalid_context", "Lumi 返回了无效页面上下文。");
+  await stillCurrent();
+  const permission = message.allowed ? "allow" : "block";
+  const result = await policyRpc("page_rule", {
+    contextId: context.contextId,
+    permission,
+    policyEpoch: epoch,
+  });
+  if (
+    corePort !== port ||
+    !coreReady ||
+    !result ||
+    result.url !== url ||
+    result.permission !== permission ||
+    result.policyEpoch !== policy?.epoch ||
+    policy.blocked.has(url) === message.allowed
+  )
+    throw new LumiError(
+      "policy_not_synced",
+      "Lumi 尚未确认此页规则，未报告成功。",
+    );
+  if (message.allowed) {
+    if (normalizePolicyUrl((await chrome.tabs.get(message.tabId)).url) !== url)
+      throw new LumiError(
+        "navigation_changed",
+        "页面已变化；规则已同步，当前页面未恢复。",
+      );
+    if (
+      corePort !== port ||
+      !coreReady ||
+      result.policyEpoch !== policy?.epoch ||
+      !(await chrome.permissions.contains({ origins: HOST_ORIGINS }))
+    )
+      throw new LumiError("permission_required", "连接或网站权限已变化。");
+    await chrome.storage.local.set({ lumiAutoConsent: true });
+    // Consent alone cannot bypass a closed Core or its current policy.
+    if (
+      corePort !== port ||
+      !coreReady ||
+      result.policyEpoch !== policy?.epoch ||
+      (holdRevisions.get(message.tabId) || 0) !== holdRevision
+    )
+      throw new LumiError(
+        "policy_changed",
+        "连接或接管状态已变化；规则已同步，页面未恢复。",
+      );
+    autoConsent = true;
+    hostGranted = await chrome.permissions.contains({ origins: HOST_ORIGINS });
+    if (
+      !hostGranted ||
+      corePort !== port ||
+      !coreReady ||
+      result.policyEpoch !== policy?.epoch ||
+      (holdRevisions.get(message.tabId) || 0) !== holdRevision
+    )
+      throw new LumiError(
+        "permission_required",
+        "连接、接管或网站权限已变化。",
+      );
+    tabHolds.delete(message.tabId);
+    await persistHolds();
+    await reconcileAll();
+  }
+  return transportStatus();
+}
 const HOST_ORIGINS = ["http://*/*", "https://*/*"];
 let autoConsent = false;
 let hostGranted = false;
 let authorityInitialized;
+let storageTrusted = false;
 let policy = null;
 const tabHolds = new Map();
+const holdRevisions = new Map();
 const reconciling = new Map();
 const reconcileAgain = new Set();
 const SESSION_LIMIT = 200;
@@ -43,6 +202,10 @@ function detachTab(tabId) {
 function initializeAuthority() {
   if (!authorityInitialized)
     authorityInitialized = (async () => {
+      await chrome.storage.local.setAccessLevel({
+        accessLevel: "TRUSTED_CONTEXTS",
+      });
+      storageTrusted = true;
       const [local, session] = await Promise.all([
         chrome.storage.local.get("lumiAutoConsent"),
         chrome.storage.session.get("lumiTabHolds"),
@@ -69,7 +232,7 @@ function allowedUrl(url) {
   }
 }
 function canAutoControl() {
-  return autoConsent && hostGranted && nativeReady && !!policy;
+  return autoConsent && hostGranted && coreReady && !!policy;
 }
 async function persistHolds() {
   try {
@@ -85,6 +248,7 @@ async function persistHolds() {
   }
 }
 function holdTabId(tabId, state) {
+  holdRevisions.set(tabId, (holdRevisions.get(tabId) || 0) + 1);
   tabHolds.set(tabId, state);
   for (const s of sessions.values()) if (s.tabId === tabId) revoke(s, state);
   return persistHolds();
@@ -236,7 +400,9 @@ function initializeTransport() {
       .then((alarms) => {
         const paused = alarms.find((alarm) => alarm.name === EXHAUSTED_ALARM);
         if (paused) {
-          retryPaused = true;
+          retryPaused = false;
+          retryAttempt = RETRY_DELAYS_MINUTES.length;
+          retryAt = paused.scheduledTime;
           retryAlarm = EXHAUSTED_ALARM;
           return;
         }
@@ -257,20 +423,20 @@ function initializeTransport() {
 }
 async function clearRetryAlarms(expectedPort = null) {
   for (const alarm of await chrome.alarms.getAll()) {
-    if (expectedPort && (nativePort !== expectedPort || !nativeReady)) return;
+    if (expectedPort && (corePort !== expectedPort || !coreReady)) return;
     if (alarm.name.startsWith(RETRY_PREFIX))
       await chrome.alarms.clear(alarm.name);
   }
 }
 function scheduleReconnect() {
   if (retryAttempt >= RETRY_DELAYS_MINUTES.length) {
-    retryPaused = true;
-    retryAt = null;
+    retryPaused = false;
+    retryAt = Date.now() + 30 * 60000;
     retryAlarm = EXHAUSTED_ALARM;
-    // One-off exhaustion marker, never a connection timer. Browser startup or
-    // explicit retry resets it. Chrome may clear alarms; this is not permanent storage.
+    // Once fast retries are exhausted, probe communication only every 30 minutes.
+    // This never enables Core, restores refs or authorizes a page.
     void chrome.alarms
-      .create(EXHAUSTED_ALARM, { when: Date.now() + 365 * 24 * 60 * 60 * 1000 })
+      .create(EXHAUSTED_ALARM, { when: retryAt })
       .catch(() => {});
     return;
   }
@@ -283,15 +449,21 @@ function scheduleReconnect() {
   });
 }
 function transportFailed(reason) {
+  pairingStatus = null;
+  for (const request of [...pagePolicyRequests.values()])
+    request.finish({
+      code: "disconnected",
+      message: "Lumi 连接已断开，规则未确认。",
+    });
   policy = null;
   transportEpoch++;
-  nativePort = null;
-  nativeReady = false;
+  corePort = null;
+  coreReady = false;
   if (handshakeAlarm) void chrome.alarms.clear(handshakeAlarm);
   handshakeAlarm = null;
   transportError = reason;
-  for (const id of nativeRequests.keys()) recentNativeIds.set(id, Date.now());
-  nativeRequests.clear();
+  for (const id of remoteRequests.keys()) recentRequestIds.set(id, Date.now());
+  remoteRequests.clear();
   pruneRecentIds();
   for (const session of sessions.values()) {
     if (["active", "paused"].includes(session.state))
@@ -301,6 +473,7 @@ function transportFailed(reason) {
   publish();
 }
 function ensureConnection({ resetBudget = false } = {}) {
+  if (resettingPairing) return Promise.resolve();
   if (connecting) {
     // Lifecycle/manual reset requests must survive an in-progress MV3 restore.
     return resetBudget
@@ -309,7 +482,11 @@ function ensureConnection({ resetBudget = false } = {}) {
   }
   connecting = (async () => {
     await Promise.all([initializeTransport(), initializeAuthority()]);
-    if (nativePort) return;
+    if (!storageTrusted) {
+      transportError = "无法保护本地连接凭据，连接已停止。";
+      return;
+    }
+    if (corePort) return;
     if (resetBudget) {
       await clearRetryAlarms();
       retryAttempt = 0;
@@ -321,7 +498,7 @@ function ensureConnection({ resetBudget = false } = {}) {
     retryAt = null;
     retryAlarm = null;
     try {
-      openNativePort();
+      openCorePort();
     } catch (error) {
       transportFailed(
         error.message || "无法连接 Lumi，请检查 Browser User 设置。",
@@ -335,6 +512,7 @@ function ensureConnection({ resetBudget = false } = {}) {
 function transportStatus() {
   return {
     sessions: localList(),
+    ...(pairingStatus || {}),
     autoConsent,
     hostGranted,
     policyReady: !!policy,
@@ -344,8 +522,8 @@ function transportStatus() {
     sessionLimit: SESSION_LIMIT,
     limitReached,
     publicationTruncated,
-    connected: nativeReady,
-    connecting: !!nativePort && !nativeReady,
+    connected: coreReady,
+    connecting: !!corePort && !coreReady,
     transportError,
     retry: {
       attempt: retryAttempt,
@@ -358,13 +536,13 @@ function transportStatus() {
 
 // Bounded per-worker replay protection, in addition to Lumi's UUID request IDs.
 // A completed request is never executed twice, including after ambiguous input.
-const recentNativeIds = new Map();
+const recentRequestIds = new Map();
 function pruneRecentIds() {
   const cutoff = Date.now() - 10 * 60 * 1000;
-  for (const [id, time] of recentNativeIds)
-    if (time < cutoff) recentNativeIds.delete(id);
-  while (recentNativeIds.size > 1024)
-    recentNativeIds.delete(recentNativeIds.keys().next().value);
+  for (const [id, time] of recentRequestIds)
+    if (time < cutoff) recentRequestIds.delete(id);
+  while (recentRequestIds.size > 1024)
+    recentRequestIds.delete(recentRequestIds.keys().next().value);
 }
 const describe = (s) => ({
   id: s.id,
@@ -400,7 +578,7 @@ const localList = () =>
     }
     return item;
   });
-function postNative(port, message) {
+function postCore(port, message) {
   if (message.type === "sessions") {
     publicationTruncated = message.sessions.length > SESSION_LIMIT;
     if (publicationTruncated)
@@ -412,7 +590,7 @@ function postNative(port, message) {
   }
   const encodedSize = (value) =>
     new TextEncoder().encode(JSON.stringify(value)).length;
-  if (encodedSize(message) > 900 * 1024) {
+  if (encodedSize(message) > 450 * 1024) {
     if (message.type === "response") {
       message = {
         type: "response",
@@ -420,7 +598,7 @@ function postNative(port, message) {
         error: {
           code: "response_too_large",
           message:
-            "Browser response exceeds the safe native transport budget. Narrow the request.",
+            "Browser response exceeds the safe transport budget. Narrow the request.",
         },
       };
     } else if (message.type === "sessions") {
@@ -428,7 +606,7 @@ function postNative(port, message) {
       let bytes = 256;
       for (const session of message.sessions) {
         const size = encodedSize(session) + 1;
-        if (bytes + size > 900 * 1024) break;
+        if (bytes + size > 450 * 1024) break;
         sessions.push(session);
         bytes += size;
       }
@@ -440,8 +618,8 @@ function postNative(port, message) {
 }
 function publish() {
   try {
-    if (nativePort)
-      postNative(nativePort, {
+    if (corePort)
+      postCore(corePort, {
         type: "sessions",
         policyEpoch: policy?.epoch ?? null,
         sessions: list(),
@@ -450,7 +628,7 @@ function publish() {
   chrome.action.setBadgeText({
     text: [...sessions.values()].some((s) => s.state === "active") ? "ON" : "",
   });
-  chrome.action.setBadgeBackgroundColor({ color: "#7955f5" });
+  chrome.action.setBadgeBackgroundColor({ color: "#f59e0b" });
 }
 function errorJSON(e) {
   return {
@@ -459,21 +637,26 @@ function errorJSON(e) {
     ...(e.details ? { details: e.details } : {}),
   };
 }
-function openNativePort() {
-  if (nativePort) return;
-  const port = chrome.runtime.connectNative("com.lumiplug.browser");
-  nativePort = port;
-  nativeReady = false;
+function openCorePort() {
+  if (corePort) return;
+  const port = createCorePort({
+    storage: chrome.storage.local,
+    onPairing: (status) => {
+      if (corePort === port) pairingStatus = status;
+    },
+  });
+  corePort = port;
+  coreReady = false;
   handshakeAlarm = `lumi-browser-handshake-${crypto.randomUUID()}`;
   void chrome.alarms
-    .create(handshakeAlarm, { when: Date.now() + 60000 })
+    .create(handshakeAlarm, { when: Date.now() + 180000 })
     .catch(() => {});
   transportError = "";
   port.onMessage.addListener((message) => {
-    if (nativePort !== port) return;
+    if (corePort !== port) return;
     if (message?.type === "ready") {
-      if (nativeReady) return;
-      nativeReady = true;
+      if (coreReady) return;
+      coreReady = true;
       retryAttempt = 0;
       retryAt = null;
       retryPaused = false;
@@ -485,21 +668,27 @@ function openNativePort() {
       publish();
       return;
     }
-    if (nativeReady && message?.type === "policy") {
+    if (coreReady && message?.type === "policy") {
       acceptPolicy(message);
       return;
     }
     if (
-      !nativeReady ||
+      !coreReady ||
       typeof message?.id !== "string" ||
       !message.id ||
       message.id.length > 128
     )
       return;
+    if (["page_context_result", "page_rule_result"].includes(message.type)) {
+      const pending = pagePolicyRequests.get(message.id);
+      if (pending?.port === port && pending.type === message.type)
+        pending.finish(message.error, message.result);
+      return;
+    }
     if (message.type === "cancel") {
-      const pending = nativeRequests.get(message.id);
+      const pending = remoteRequests.get(message.id);
       if (pending?.port === port && pending.session?.state === "active") {
-        // The host authenticates client ownership. Only the request's bound
+        // The Core authenticates request cancellation. Only the request's bound
         // session is paused; no other tab/session is affected by cancellation.
         void holdTab(pending.session, "paused").catch(() => {});
       }
@@ -507,7 +696,7 @@ function openNativePort() {
     }
     if (message.type !== "request") return;
     if (!canAutoControl() || message.policyEpoch !== policy.epoch) {
-      postNative(port, {
+      postCore(port, {
         type: "response",
         id: message.id,
         error: {
@@ -518,8 +707,8 @@ function openNativePort() {
       return;
     }
     pruneRecentIds();
-    if (nativeRequests.has(message.id) || recentNativeIds.has(message.id)) {
-      postNative(port, {
+    if (remoteRequests.has(message.id) || recentRequestIds.has(message.id)) {
+      postCore(port, {
         type: "response",
         id: message.id,
         error: {
@@ -530,8 +719,8 @@ function openNativePort() {
       });
       return;
     }
-    if (nativeRequests.size >= 128) {
-      postNative(port, {
+    if (remoteRequests.size >= 128) {
+      postCore(port, {
         type: "response",
         id: message.id,
         error: { code: "busy", message: "Too many pending browser requests." },
@@ -540,9 +729,9 @@ function openNativePort() {
     }
     let args;
     try {
-      args = validateNativeRequest(message);
+      args = validateRemoteRequest(message);
     } catch (error) {
-      postNative(port, {
+      postCore(port, {
         type: "response",
         id: message.id,
         error: errorJSON(error),
@@ -550,16 +739,16 @@ function openNativePort() {
       return;
     }
     const pending = { port, session: sessions.get(args.sessionId) };
-    nativeRequests.set(message.id, pending);
+    remoteRequests.set(message.id, pending);
     handleRequest(message.tool, args)
       .then(
         (result) => {
-          if (nativePort === port)
-            postNative(port, { type: "response", id: message.id, result });
+          if (corePort === port)
+            postCore(port, { type: "response", id: message.id, result });
         },
         (error) => {
-          if (nativePort === port)
-            postNative(port, {
+          if (corePort === port)
+            postCore(port, {
               type: "response",
               id: message.id,
               error: errorJSON(error),
@@ -568,17 +757,17 @@ function openNativePort() {
       )
       .catch(() => {})
       .finally(() => {
-        recentNativeIds.set(message.id, Date.now());
+        recentRequestIds.set(message.id, Date.now());
         pruneRecentIds();
-        if (nativeRequests.get(message.id) === pending)
-          nativeRequests.delete(message.id);
+        if (remoteRequests.get(message.id) === pending)
+          remoteRequests.delete(message.id);
       });
   });
   port.onDisconnect.addListener(() => {
     // A late callback from an old port must never revoke a newer connection.
-    if (nativePort !== port) return;
+    if (corePort !== port) return;
     const reason =
-      chrome.runtime.lastError?.message ||
+      port.error ||
       "Lumi disconnected. Browser control is blocked until a new authenticated policy arrives.";
     transportFailed(reason);
   });
@@ -956,13 +1145,39 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     return;
   (async () => {
     if (message.type === "status") {
-      await ensureConnection();
+      await ensureConnection({ resetBudget: message.probe === true });
       return transportStatus();
     }
     if (message.type === "reconnect") {
       await ensureConnection({ resetBudget: true });
       return transportStatus();
     }
+    if (message.type === "reset_pairing") {
+      if (message.confirmed !== true || coreReady || resettingPairing)
+        throw new LumiError(
+          "confirmation_required",
+          "仅在未连接时明确确认重新配对。",
+        );
+      resettingPairing = true;
+      try {
+        const oldPort = corePort;
+        if (oldPort) await oldPort.resetPairing();
+        else await resetCorePairing(chrome.storage.local);
+        pairingStatus = null;
+        transportError = "扩展旧凭据已清除；还需在 Lumi 中确认重新配对。";
+      } finally {
+        resettingPairing = false;
+      }
+      await ensureConnection({ resetBudget: true });
+      return transportStatus();
+    }
+    if (message.type === "confirm_pairing") {
+      if (!corePort || pairingStatus?.pairingId !== message.pairingId)
+        throw new LumiError("pairing_changed", "配对请求已变化。");
+      corePort.confirmPairing(message.pairingId);
+      return transportStatus();
+    }
+    if (message.type === "set_page_allowed") return setPageAllowed(message);
     if (message.type === "command")
       return handleRequest(message.tool, message.args || {});
     if (message.type === "enable_auto") {
@@ -1017,6 +1232,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   return true;
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
+  holdRevisions.delete(tabId);
   attachmentSlots.delete(tabId);
   expectedDetach.delete(tabId);
   tabHolds.delete(tabId);
@@ -1122,16 +1338,15 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.alarms.onAlarm.addListener((alarm) => {
   void (async () => {
     await initializeTransport();
-    if (alarm.name === handshakeAlarm && nativePort && !nativeReady) {
-      const timedOutPort = nativePort;
+    if (alarm.name === handshakeAlarm && corePort && !coreReady) {
+      const timedOutPort = corePort;
       transportFailed(
         "Lumi connection handshake timed out. Check Browser User settings.",
       );
       timedOutPort.disconnect();
       return;
     }
-    if (alarm.name === EXHAUSTED_ALARM) return;
-    if (nativePort || retryPaused || alarm.name !== retryAlarm) return;
+    if (corePort || retryPaused || alarm.name !== retryAlarm) return;
     retryAt = null;
     retryAlarm = null;
     await ensureConnection();

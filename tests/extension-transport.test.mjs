@@ -1,3 +1,7 @@
+import {
+  installWebSocketMock,
+  settleWebSocketMock,
+} from "./helpers/websocket.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 const event = () => ({
@@ -10,6 +14,8 @@ const event = () => ({
   },
 });
 const flush = async () => {
+  await new Promise((resolve) => setImmediate(resolve));
+  await settleWebSocketMock();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 };
@@ -27,8 +33,7 @@ async function setup({ alarms = [], fail = false, initializationGate } = {}) {
       onMessage: event(),
       onStartup: event(),
       onInstalled: event(),
-      connectNative(name) {
-        assert.equal(name, "com.lumiplug.browser");
+      createTestPort() {
         attempts++;
         const port = {
           onMessage: event(),
@@ -64,6 +69,7 @@ async function setup({ alarms = [], fail = false, initializationGate } = {}) {
     },
     storage: {
       local: {
+        setAccessLevel: async () => {},
         get: async () => ({ lumiAutoConsent: false }),
         set: async () => {},
       },
@@ -104,6 +110,7 @@ async function setup({ alarms = [], fail = false, initializationGate } = {}) {
       ],
     },
   };
+  installWebSocketMock(() => chrome.runtime.createTestPort());
   await import(
     `../extension/background.js?transport-test=${crypto.randomUUID()}`
   );
@@ -149,16 +156,18 @@ test("worker startup establishes communication, but ready handshake and tab cons
   await flush();
   assert.equal(env.attempts(), 1);
   env.ports[0].onMessage.fire({ type: "ready" });
+  await flush();
   state = (await env.send({ type: "status" })).result;
   assert.equal(state.connected, true);
   assert.equal(state.connecting, false);
   const published = env.ports[0].sent.length;
   env.ports[0].onMessage.fire({ type: "ready" });
+  await flush();
   assert.equal(env.ports[0].sent.length, published);
   assert.equal(env.attached.length, 0);
 });
 
-test("missing host has finite alarm backoff; status reads do not bypass it, manual retry does", async () => {
+test("missing host backs off to low-frequency probes; only popup opening bypasses delay", async () => {
   const env = await setup({ fail: true });
   assert.equal(env.attempts(), 1);
   for (let i = 1; i <= 5; i++) {
@@ -170,17 +179,21 @@ test("missing host has finite alarm backoff; status reads do not bypass it, manu
     await env.fire(`lumi-browser-connect-${i}`);
   }
   assert.equal(env.attempts(), 6);
-  assert.equal((await env.send({ type: "status" })).result.retry.paused, true);
+  assert.equal((await env.send({ type: "status" })).result.retry.paused, false);
+  assert.ok(
+    env.scheduled.get("lumi-browser-connect-paused").scheduledTime >=
+      Date.now() + 29 * 60000,
+  );
   await env.fire("lumi-browser-connect-paused");
-  assert.equal(env.attempts(), 6);
-  await env.send({ type: "reconnect" });
-  await flush();
   assert.equal(env.attempts(), 7);
+  await env.send({ type: "status", probe: true });
+  await flush();
+  assert.equal(env.attempts(), 8);
   assert.ok(env.scheduled.has("lumi-browser-connect-1"));
   assert.equal(env.attached.length, 0);
 });
 
-test("MV3 restart respects an existing retry alarm and an exhausted marker", async () => {
+test("MV3 restart respects an existing retry alarm and the low-frequency probe timer", async () => {
   const env = await setup({
     fail: true,
     alarms: [
@@ -205,14 +218,14 @@ test("MV3 restart respects an existing retry alarm and an exhausted marker", asy
   assert.equal(paused.attempts(), 0);
   assert.equal(
     (await paused.send({ type: "status" })).result.retry.paused,
-    true,
+    false,
   );
   chrome.runtime.onStartup.fire();
   await flush();
   assert.equal(paused.attempts(), 1);
 });
 
-test("a host without the new ready handshake times out safely through alarms", async () => {
+test("a Core without the application ready handshake times out safely through alarms", async () => {
   const env = await setup();
   const handshake = [...env.scheduled.keys()].find((name) =>
     name.startsWith("lumi-browser-handshake-"),
@@ -249,7 +262,7 @@ test("browser-startup reset survives asynchronous worker initialization", async 
   assert.equal(env.attached.length, 0);
 });
 
-test("late callbacks from an old native port cannot mark or break the new connection", async () => {
+test("late callbacks from an old secure connection cannot mark or break the new connection", async () => {
   const env = await setup();
   const first = env.ports[0];
   first.onMessage.fire({ type: "ready" });
@@ -261,6 +274,7 @@ test("late callbacks from an old native port cannot mark or break the new connec
   first.onDisconnect.fire();
   assert.equal((await env.send({ type: "status" })).result.connected, false);
   second.onMessage.fire({ type: "ready" });
+  await flush();
   first.onDisconnect.fire();
   assert.equal((await env.send({ type: "status" })).result.connected, true);
   assert.equal(env.attached.length, 0);

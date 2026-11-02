@@ -1,3 +1,7 @@
+import {
+  installWebSocketMock,
+  settleWebSocketMock,
+} from "./helpers/websocket.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -11,6 +15,7 @@ const event = () => ({
   },
 });
 async function flush() {
+  await settleWebSocketMock();
   for (let i = 0; i < 8; i++)
     await new Promise((resolve) => setImmediate(resolve));
 }
@@ -21,6 +26,7 @@ const normalTab = (id, url = "https://example.test/orders") => ({
 });
 function storageArea(data) {
   return {
+    async setAccessLevel() {},
     async get(keys) {
       if (typeof keys === "string") return { [keys]: data[keys] };
       if (Array.isArray(keys))
@@ -59,8 +65,7 @@ async function setup({
       onMessage: event(),
       onStartup: event(),
       onInstalled: event(),
-      connectNative(name) {
-        assert.equal(name, "com.lumiplug.browser");
+      createTestPort() {
         const port = {
           onMessage: event(),
           onDisconnect: event(),
@@ -138,6 +143,7 @@ async function setup({
     },
   };
   globalThis.chrome = chromeMock;
+  installWebSocketMock(() => chrome.runtime.createTestPort());
   await import(`../extension/background.js?policy-test=${crypto.randomUUID()}`);
   await flush();
   const listener = chromeMock.runtime.onMessage.listeners[0];
@@ -261,6 +267,17 @@ test("policy update cancels pending work immediately and removes matching links 
   const port = await env.ready();
   const original = (await env.active())[0];
   assert.ok(original);
+  // A real encrypted transport delivers separate tasks. Keep the action pending
+  // until the newer policy has actually arrived, then verify the dispatch guard.
+  let releasePrepare;
+  const prepareGate = new Promise((resolve) => {
+    releasePrepare = resolve;
+  });
+  const originalScript = env.chrome.scripting.executeScript;
+  env.chrome.scripting.executeScript = async (options) => {
+    if (options.args[0] === "prepare") await prepareGate;
+    return originalScript(options);
+  };
   port.onMessage.fire({
     type: "request",
     id: "queued-click",
@@ -273,6 +290,8 @@ test("policy update cancels pending work immediately and removes matching links 
     epoch: 2,
     blockedUrls: ["https://example.test/orders"],
   });
+  await flush();
+  releasePrepare();
   await flush();
   assert.equal(env.commands.length, 0);
   assert.equal((await env.active()).length, 0);
@@ -660,4 +679,198 @@ test("permission revocation wins even if an in-flight permission check later res
   assert.ok(
     port.sent.find((message) => message.id === "permission-race").error,
   );
+});
+
+test("popup block persists through authenticated context/rule exchange and requires policy before success", async () => {
+  const env = await setup();
+  const port = await env.ready();
+  const pending = env.send({
+    type: "set_page_allowed",
+    tabId: 1,
+    url: "https://example.test/orders?x=1",
+    allowed: false,
+  });
+  await flush();
+  assert.equal(
+    (await env.active()).length,
+    0,
+    "Block cancels control before Core reply",
+  );
+  const context = port.sent.find((m) => m.type === "page_context");
+  assert.equal(context.url, "https://example.test/orders");
+  port.onMessage.fire({
+    type: "page_context_result",
+    id: context.id,
+    result: { contextId: "ctx", url: context.url, policyEpoch: 1 },
+  });
+  await flush();
+  const rule = port.sent.find((m) => m.type === "page_rule");
+  assert.equal(rule.permission, "block");
+  assert.equal(rule.url, undefined);
+  await env.policy(2, [context.url]);
+  port.onMessage.fire({
+    type: "page_rule_result",
+    id: rule.id,
+    result: { url: context.url, permission: "block", policyEpoch: 2 },
+  });
+  assert.equal((await pending).result.blockedUrls[0], context.url);
+});
+
+test("popup allow requires Core commit and fresh policy before granting consent or releasing hold", async () => {
+  const env = await setup({
+    consent: false,
+    sessionData: { lumiTabHolds: { 1: "taken_over" } },
+  });
+  const url = "https://example.test/orders",
+    port = await env.ready(1, [url]);
+  const pending = env.send({
+    type: "set_page_allowed",
+    tabId: 1,
+    url,
+    allowed: true,
+  });
+  await flush();
+  assert.equal(env.local.lumiAutoConsent, false);
+  const context = port.sent.find((m) => m.type === "page_context");
+  port.onMessage.fire({
+    type: "page_context_result",
+    id: context.id,
+    result: { contextId: "ctx", url, policyEpoch: 1 },
+  });
+  await flush();
+  const rule = port.sent.find((m) => m.type === "page_rule");
+  await env.policy(2, []);
+  port.onMessage.fire({
+    type: "page_rule_result",
+    id: rule.id,
+    result: { url, permission: "allow", policyEpoch: 2 },
+  });
+  assert.ok((await pending).result.autoConsent);
+  assert.equal((await env.status()).tabHolds[1], undefined);
+});
+
+test("popup cannot change navigated page, and pending policy mutation fails closed on disconnect", async () => {
+  const env = await setup();
+  const port = await env.ready();
+  const invalid = await env.send({
+    type: "set_page_allowed",
+    tabId: 1,
+    url: "https://example.test/other",
+    allowed: false,
+  });
+  assert.equal(invalid.error.code, "navigation_changed");
+  const pending = env.send({
+    type: "set_page_allowed",
+    tabId: 1,
+    url: "https://example.test/orders",
+    allowed: false,
+  });
+  await flush();
+  port.onDisconnect.fire();
+  assert.equal((await pending).error.code, "disconnected");
+  assert.equal((await env.status()).tabHolds[1], "taken_over");
+});
+
+test("Core ACK without matching broadcast policy is not success", async () => {
+  const env = await setup();
+  const port = await env.ready();
+  const url = "https://example.test/orders";
+  const pending = env.send({
+    type: "set_page_allowed",
+    tabId: 1,
+    url,
+    allowed: false,
+  });
+  await flush();
+  const context = port.sent.find((m) => m.type === "page_context");
+  port.onMessage.fire({
+    type: "page_context_result",
+    id: context.id,
+    result: { contextId: "ctx", url, policyEpoch: 1 },
+  });
+  await flush();
+  const rule = port.sent.find((m) => m.type === "page_rule");
+  port.onMessage.fire({
+    type: "page_rule_result",
+    id: rule.id,
+    result: { url, permission: "block", policyEpoch: 2 },
+  });
+  assert.equal((await pending).error.code, "policy_not_synced");
+});
+
+test("navigation after context prevents mutation, and a later user takeover is not released by allow", async () => {
+  let env = await setup();
+  let port = await env.ready();
+  const url = "https://example.test/orders";
+  let pending = env.send({
+    type: "set_page_allowed",
+    tabId: 1,
+    url,
+    allowed: true,
+  });
+  await flush();
+  let context = port.sent.find((m) => m.type === "page_context");
+  env.tabMap.get(1).url = "https://example.test/other";
+  port.onMessage.fire({
+    type: "page_context_result",
+    id: context.id,
+    result: { contextId: "ctx", url, policyEpoch: 1 },
+  });
+  assert.equal((await pending).error.code, "policy_changed");
+  assert.equal(
+    port.sent.some((m) => m.type === "page_rule"),
+    false,
+  );
+  env = await setup();
+  port = await env.ready();
+  pending = env.send({
+    type: "set_page_allowed",
+    tabId: 1,
+    url,
+    allowed: true,
+  });
+  await flush();
+  context = port.sent.find((m) => m.type === "page_context");
+  port.onMessage.fire({
+    type: "page_context_result",
+    id: context.id,
+    result: { contextId: "ctx", url, policyEpoch: 1 },
+  });
+  await flush();
+  const rule = port.sent.find((m) => m.type === "page_rule");
+  await env.send({ type: "takeover", tabId: 1 });
+  port.onMessage.fire({
+    type: "page_rule_result",
+    id: rule.id,
+    result: { url, permission: "allow", policyEpoch: 1 },
+  });
+  assert.equal((await pending).error.code, "policy_changed");
+  assert.equal((await env.status()).tabHolds[1], "taken_over");
+});
+
+test("pairing reset requires explicit confirmation while disconnected and preserves webpage consent", async () => {
+  const env = await setup();
+  const port = await env.ready();
+  assert.equal(
+    (await env.send({ type: "reset_pairing", confirmed: true })).error.code,
+    "confirmation_required",
+  );
+  port.onDisconnect.fire();
+  await flush();
+  env.local.lumiCorePairing = { secret: "old", pairingId: "old" };
+  assert.equal(
+    (await env.send({ type: "reset_pairing" })).error.code,
+    "confirmation_required",
+  );
+  assert.ok(env.local.lumiCorePairing);
+  const result = await env.send({ type: "reset_pairing", confirmed: true });
+  assert.equal(result.error, undefined);
+  assert.equal(env.local.lumiCorePairing, undefined);
+  assert.equal(env.local.lumiAutoConsent, true);
+  assert.equal(
+    result.result.connected,
+    false,
+    "Clearing one endpoint is not a successful connection",
+  );
+  assert.equal(result.result.policyReady, false);
 });

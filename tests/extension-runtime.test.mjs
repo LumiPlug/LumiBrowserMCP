@@ -1,3 +1,7 @@
+import {
+  installWebSocketMock,
+  settleWebSocketMock,
+} from "./helpers/websocket.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 const event = () => ({
@@ -25,8 +29,7 @@ const port = {
 };
 globalThis.chrome = {
   runtime: {
-    connectNative(name) {
-      assert.equal(name, "com.lumiplug.browser");
+    createTestPort() {
       return port;
     },
     id: "test",
@@ -48,6 +51,7 @@ globalThis.chrome = {
   },
   storage: {
     local: {
+      setAccessLevel: async () => {},
       get: async () => ({ lumiAutoConsent: true }),
       set: async () => {},
     },
@@ -91,12 +95,25 @@ globalThis.chrome = {
     ],
   },
 };
+const wsMock = installWebSocketMock(() => chrome.runtime.createTestPort());
 await import("../extension/background.js");
+await settleWebSocketMock();
 await new Promise((resolve) => setTimeout(resolve, 0));
 port.onMessage.fire({ type: "ready" });
 port.onMessage.fire({ type: "policy", epoch: 1, blockedUrls: [] });
+await settleWebSocketMock();
 await new Promise((resolve) => setTimeout(resolve, 0));
 const listener = chrome.runtime.onMessage.listeners[0];
+async function waitForResponse(requestId) {
+  const deadline = Date.now() + 2000;
+  do {
+    await settleWebSocketMock();
+    const response = port.sent.find((message) => message.id === requestId);
+    if (response) return response;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  } while (Date.now() < deadline);
+  assert.fail(`Timed out waiting for encrypted response ${requestId}`);
+}
 const rawSend = (message) =>
   new Promise((resolve) =>
     listener(
@@ -269,8 +286,9 @@ test("extension runtime consent and CDP behavior", async (t) => {
     );
   });
   await t.test(
-    "native route exposes only tools and publishes sessions",
+    "secure Core route exposes only tools and publishes sessions",
     async () => {
+      await settleWebSocketMock();
       assert.ok(
         port.sent.some(
           (m) => m.type === "sessions" && m.sessions.some((s) => s.id === id),
@@ -282,6 +300,7 @@ test("extension runtime consent and CDP behavior", async (t) => {
         tool: "snapshot",
         args: { sessionId: id },
       });
+      await settleWebSocketMock();
       await new Promise((r) => setTimeout(r, 10));
       assert.equal(port.sent.find((m) => m.id === "n1").result.ok, true);
       port.onMessage.fire({
@@ -290,6 +309,7 @@ test("extension runtime consent and CDP behavior", async (t) => {
         tool: "authorize",
         args: { tabId: 9 },
       });
+      await settleWebSocketMock();
       await new Promise((r) => setTimeout(r, 10));
       assert.equal(
         port.sent.find((m) => m.id === "n2").error.code,
@@ -298,7 +318,7 @@ test("extension runtime consent and CDP behavior", async (t) => {
     },
   );
   await t.test(
-    "native duplicate IDs never overwrite or replay an accepted click",
+    "secure Core duplicate IDs never overwrite or replay an accepted click",
     async () => {
       commands.length = 0;
       const message = {
@@ -309,6 +329,7 @@ test("extension runtime consent and CDP behavior", async (t) => {
       };
       port.onMessage.fire(message);
       port.onMessage.fire(message);
+      await settleWebSocketMock();
       await new Promise((r) => setTimeout(r, 10));
       assert.equal(
         commands.filter((c) => c.params.type === "mousePressed").length,
@@ -321,6 +342,7 @@ test("extension runtime consent and CDP behavior", async (t) => {
       );
       assert.ok(port.sent.some((m) => m.id === "one-click" && m.result?.ok));
       port.onMessage.fire(message);
+      await settleWebSocketMock();
       await new Promise((r) => setTimeout(r, 10));
       assert.equal(
         commands.filter((c) => c.params.type === "mousePressed").length,
@@ -335,7 +357,7 @@ test("extension runtime consent and CDP behavior", async (t) => {
     },
   );
   await t.test(
-    "native malformed arguments are rejected before dispatch",
+    "secure Core malformed arguments are rejected before dispatch",
     async () => {
       commands.length = 0;
       for (const [suffix, args] of [
@@ -350,6 +372,7 @@ test("extension runtime consent and CDP behavior", async (t) => {
           tool: "scroll",
           args,
         });
+        await settleWebSocketMock();
         assert.equal(
           port.sent.find((m) => m.id === "bad-" + suffix).error.code,
           "invalid_argument",
@@ -368,12 +391,13 @@ test("extension runtime consent and CDP behavior", async (t) => {
         tool: "click",
         args: { sessionId: id, ref: "r" },
       });
+      await settleWebSocketMock();
       assert.equal(port.sent.length, before);
       assert.equal(commands.length, 0);
     },
   );
   await t.test(
-    "native response guard replaces oversized output with a bounded error",
+    "secure Core response guard replaces oversized output with a bounded error",
     async () => {
       largeResult = true;
       port.onMessage.fire({
@@ -382,6 +406,7 @@ test("extension runtime consent and CDP behavior", async (t) => {
         tool: "snapshot",
         args: { sessionId: id },
       });
+      await settleWebSocketMock();
       await new Promise((r) => setTimeout(r, 10));
       largeResult = false;
       const response = port.sent.find((m) => m.id === "large-response");
@@ -392,9 +417,10 @@ test("extension runtime consent and CDP behavior", async (t) => {
     },
   );
   await t.test(
-    "native cancel stops pending request and only its session",
+    "secure Core cancel stops pending request and only its session",
     async () => {
       chrome.tabs.onCreated.fire({ ...tab, id: 8 });
+      await settleWebSocketMock();
       await new Promise((resolve) => setTimeout(resolve, 0));
       const other = (await send({ type: "status" })).result.sessions.find(
         (session) => session.tabId === 8,
@@ -403,13 +429,19 @@ test("extension runtime consent and CDP behavior", async (t) => {
       port.onMessage.fire({
         type: "request",
         id: "cancel-me",
-        tool: "click",
-        args: { sessionId: id, ref: "r" },
+        tool: "wait_for",
+        args: { sessionId: id, text: "never appears", timeoutMs: 3000 },
       });
+      await settleWebSocketMock();
+      assert.equal(
+        port.sent.some((m) => m.id === "cancel-me"),
+        false,
+      );
       port.onMessage.fire({ type: "cancel", id: "cancel-me" });
+      await settleWebSocketMock();
       await new Promise((r) => setTimeout(r, 10));
       assert.equal(
-        port.sent.find((m) => m.id === "cancel-me").error.code,
+        (await waitForResponse("cancel-me")).error.code,
         "cancelled",
       );
       assert.equal(commands.length, 0);
@@ -424,6 +456,7 @@ test("extension runtime consent and CDP behavior", async (t) => {
     async () => {
       tab.url = "https://other.example/";
       chrome.tabs.onUpdated.fire(7, { url: tab.url });
+      await settleWebSocketMock();
       await new Promise((resolve) => setTimeout(resolve, 0));
       const current = (await send({ type: "status" })).result.sessions.find(
         (session) => session.tabId === 7,
@@ -443,7 +476,7 @@ test("extension runtime consent and CDP behavior", async (t) => {
     },
   );
   await t.test(
-    "native disconnection fails closed without reconnecting",
+    "secure Core disconnection fails closed without reconnecting",
     async () => {
       port.onDisconnect.fire();
       const status = (await send({ type: "status" })).result;
@@ -452,7 +485,7 @@ test("extension runtime consent and CDP behavior", async (t) => {
         status.sessions.find((s) => s.tabId === 8).state,
         "disconnected",
       );
-      assert.match(status.transportError, /disconnected/);
+      assert.match(status.transportError, /未连接/);
     },
   );
 });

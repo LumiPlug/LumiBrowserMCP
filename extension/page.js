@@ -186,7 +186,7 @@ export function pageOperation(operation, args = {}) {
       contentTrust: "untrusted_page_data",
     };
     // Budget UTF-8 bytes rather than JS characters (Chinese can use 3 bytes).
-    // Keep headroom for final flags and the native protocol response envelope.
+    // Keep headroom for final flags and the encrypted transport response envelope.
     const encoder = new TextEncoder();
     let bytes = encoder.encode(JSON.stringify(result)).length;
     for (let i = 0; i < nodes.length; i++) {
@@ -201,7 +201,7 @@ export function pageOperation(operation, args = {}) {
         state: state(el),
       };
       const addition = encoder.encode(JSON.stringify(control)).length + 1;
-      if (bytes + addition > 700 * 1024 - 512) {
+      if (bytes + addition > 400 * 1024 - 512) {
         reasons.push("utf8_response_budget");
         break;
       }

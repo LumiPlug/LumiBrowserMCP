@@ -192,3 +192,19 @@ test("resource validation catches case mismatches, empty files and traversal", a
     /outside.js/,
   );
 });
+
+test("0.5 connects only to fixed Core loopback without Native Messaging permission", async () => {
+  const manifest = JSON.parse(
+    await readFile(path.join(root, "extension/manifest.json"), "utf8"),
+  );
+  assert.equal(manifest.version, "0.5.0");
+  assert.ok(!manifest.permissions.includes("nativeMessaging"));
+  assert.equal(
+    manifest.content_security_policy.extension_pages,
+    "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:43127",
+  );
+  assert.doesNotMatch(
+    await readFile(path.join(root, "extension/background.js"), "utf8"),
+    /connectNative/,
+  );
+});

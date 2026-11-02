@@ -1,126 +1,98 @@
+/* SPDX-License-Identifier: MPL-2.0
+ * Tokens copied from Lumi src/theme/obsidian-solar-amber.css.
+ * Native Chrome popup follows Lumi's Obsidian Solar Amber default theme.
+ */
 :root {
-  font:
-    13px/1.5 system-ui,
-    sans-serif;
-  color: #eeeaff;
-  background: #141222;
+  --lumi-canvas: #0e0e11;
+  --lumi-surface-1: #16161b;
+  --lumi-outline: #2c2c37;
+  --lumi-primary: #f59e0b;
+  --lumi-on-primary: #0e0e11;
+  --lumi-primary-hover: #fb923c;
+  --lumi-error: #ffb4ab;
+  --lumi-on-canvas: #f8fafc;
+  --lumi-on-surface-muted: #94a3b8;
+  --lumi-radius-control: 4px;
+  --lumi-radius-container: 8px;
   color-scheme: dark;
+  color: var(--lumi-on-canvas);
+  background: var(--lumi-canvas);
+  font:
+    13px/21px -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei",
+    sans-serif;
 }
 body {
-  width: 350px;
+  width: 280px;
   margin: 0;
-}
-header {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  padding: 20px;
-  background: linear-gradient(125deg, #322457, #19152c);
-}
-h1 {
-  font-size: 19px;
-  margin: 0;
-}
-header p {
-  color: #c5b9e7;
-  margin: 2px 0;
-}
-.brand-icon {
-  width: 42px;
-  height: 42px;
-  object-fit: contain;
-  flex: 0 0 auto;
 }
 main {
   padding: 16px;
 }
-section,
-.session {
-  padding: 12px;
-  border: 1px solid #3c3355;
-  border-radius: 12px;
-  margin: 12px 0;
-}
-h2 {
-  font-size: 13px;
-  margin: 0 0 6px;
-}
-p {
-  margin: 7px 0;
-  overflow-wrap: anywhere;
-}
-#origin,
-.hint,
-details {
-  font-size: 12px;
-  color: #b8afce;
-}
-button {
-  border: 1px solid #665584;
-  border-radius: 7px;
-  padding: 8px 10px;
-  background: #2c2340;
-  color: #fff;
-  cursor: pointer;
-  font: inherit;
-  margin: 4px 4px 0 0;
-}
-button:hover {
-  background: #49345f;
-}
-button:disabled {
-  opacity: 0.5;
-  cursor: wait;
-}
-.primary {
-  background: #7651d3;
-  width: 100%;
-  font-weight: 650;
-}
-.danger {
-  border-color: #d58691;
-  color: #ffc1c9;
+.status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 #connection {
-  font-size: 12px;
-  color: #d3c5f4;
+  color: var(--lumi-on-surface-muted);
+}
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--lumi-outline);
+  border-radius: var(--lumi-radius-control);
+}
+button:focus-visible {
+  outline: 2px solid var(--lumi-primary);
+  outline-offset: 2px;
+}
+#toggle {
+  width: 100%;
+  min-height: 36px;
+  color: var(--lumi-on-primary);
+  background: var(--lumi-primary);
+}
+#toggle:hover:not(:disabled) {
+  background: var(--lumi-primary-hover);
+}
+#toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+#help {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--lumi-on-surface-muted);
+  background: var(--lumi-surface-1);
+}
+.help-wrap {
+  display: contents;
+}
+#help-text {
+  display: none;
+  order: 3;
+  flex: 0 0 100%;
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid var(--lumi-outline);
+  border-radius: var(--lumi-radius-container);
+  color: var(--lumi-on-surface-muted);
+  background: var(--lumi-surface-1);
+}
+.help-wrap:hover #help-text,
+.help-wrap:focus-within #help-text {
+  display: block;
 }
 #error {
-  color: #ffafba;
-  white-space: pre-wrap;
-}
-.state {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: #bca0ff;
-}
-summary {
-  cursor: pointer;
-}
-
-label {
-  display: block;
-  margin-top: 8px;
-}
-select,
-textarea {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  background: #201a30;
-  border: 1px solid #665584;
-  border-radius: 5px;
-  color: #eee;
-  padding: 6px;
-}
-pre {
-  max-height: 300px;
-  overflow: auto;
-  white-space: pre-wrap;
+  color: var(--lumi-error);
   overflow-wrap: anywhere;
-  font-size: 11px;
-}
-details + details {
-  margin-top: 14px;
+  margin: 12px 0 0;
 }

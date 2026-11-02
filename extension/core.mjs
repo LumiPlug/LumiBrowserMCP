@@ -55,7 +55,7 @@ export const TOOL_NAMES = [
   "scroll",
   "wait_for",
 ];
-export function validateNativeRequest(message) {
+export function validateRemoteRequest(message) {
   if (
     typeof message.tool !== "string" ||
     message.tool.length > 32 ||
