@@ -1,6 +1,7 @@
 import { readdir, readFile, mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { validateExtension } from "./validate-extension.mjs";
 
 // Dependency-free, deterministic ZIP (stored entries, UTF-8 names, fixed timestamp).
 // Chrome's unpacked loader consumes the extracted extension directory on every OS.
@@ -24,13 +25,7 @@ async function walk(dir) {
   }
 }
 await walk(root);
-if (!entries.some((e) => e.name === "manifest.json"))
-  throw new Error("extension/manifest.json is missing");
-const manifest = JSON.parse(
-  entries.find((e) => e.name === "manifest.json").data,
-);
-if (manifest.manifest_version !== 3)
-  throw new Error("Only Manifest V3 is supported");
+validateExtension(entries);
 const crc32 = (bytes) => {
   let crc = 0xffffffff;
   for (const byte of bytes) {

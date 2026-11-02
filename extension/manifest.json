@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Lumi Browser — AI Browser Automation & MCP",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Connect AI agents to authorized Chrome tabs through Lumi and MCP. Read pages, click, type and scroll with visible controls.",
   "permissions": [
     "activeTab",
@@ -34,8 +34,5 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "optional_host_permissions": [
-    "http://*/*",
-    "https://*/*"
-  ]
+  "optional_host_permissions": ["http://*/*", "https://*/*"]
 }
