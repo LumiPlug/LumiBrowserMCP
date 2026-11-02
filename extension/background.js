@@ -10,9 +10,141 @@ import { pageOperation } from "./page.js";
 
 const sessions = new Map();
 let nativePort = null;
+let nativeReady = false;
+let handshakeAlarm = null;
+let transportEpoch = 0;
 let transportError = "";
 const nativeRequests = new Map();
-// Bounded per-worker replay protection, in addition to the adapter's UUID IDs.
+const RETRY_PREFIX = "lumi-browser-connect-";
+const RETRY_DELAYS_MINUTES = [1, 2, 5, 10, 30];
+const EXHAUSTED_ALARM = `${RETRY_PREFIX}paused`;
+let retryAttempt = 0;
+let retryAt = null;
+let retryPaused = false;
+let retryAlarm = null;
+let initialization;
+let connecting;
+
+// Alarm names retain the retry budget across MV3 worker suspension without
+// storing page consent, refs, requests, or adding a storage permission.
+function initializeTransport() {
+  if (!initialization)
+    initialization = chrome.alarms
+      .getAll()
+      .then((alarms) => {
+        const paused = alarms.find((alarm) => alarm.name === EXHAUSTED_ALARM);
+        if (paused) {
+          retryPaused = true;
+          retryAlarm = EXHAUSTED_ALARM;
+          return;
+        }
+        const pending = alarms
+          .filter((alarm) => /^lumi-browser-connect-[1-5]$/.test(alarm.name))
+          .sort((a, b) => b.scheduledTime - a.scheduledTime)[0];
+        if (pending) {
+          retryAttempt = Number(pending.name.slice(RETRY_PREFIX.length));
+          retryAt = pending.scheduledTime;
+          retryAlarm = pending.name;
+        }
+      })
+      .catch(() => {
+        retryPaused = true;
+        transportError = "无法读取连接重试状态，请手动重新连接 Lumi。";
+      });
+  return initialization;
+}
+async function clearRetryAlarms(expectedPort = null) {
+  for (const alarm of await chrome.alarms.getAll()) {
+    if (expectedPort && (nativePort !== expectedPort || !nativeReady)) return;
+    if (alarm.name.startsWith(RETRY_PREFIX))
+      await chrome.alarms.clear(alarm.name);
+  }
+}
+function scheduleReconnect() {
+  if (retryAttempt >= RETRY_DELAYS_MINUTES.length) {
+    retryPaused = true;
+    retryAt = null;
+    retryAlarm = EXHAUSTED_ALARM;
+    // One-off exhaustion marker, never a connection timer. Browser startup or
+    // explicit retry resets it. Chrome may clear alarms; this is not permanent storage.
+    void chrome.alarms
+      .create(EXHAUSTED_ALARM, { when: Date.now() + 365 * 24 * 60 * 60 * 1000 })
+      .catch(() => {});
+    return;
+  }
+  retryAttempt++;
+  retryAt = Date.now() + RETRY_DELAYS_MINUTES[retryAttempt - 1] * 60000;
+  retryAlarm = `${RETRY_PREFIX}${retryAttempt}`;
+  void chrome.alarms.create(retryAlarm, { when: retryAt }).catch(() => {
+    retryPaused = true;
+    retryAt = null;
+  });
+}
+function transportFailed(reason) {
+  transportEpoch++;
+  nativePort = null;
+  nativeReady = false;
+  if (handshakeAlarm) void chrome.alarms.clear(handshakeAlarm);
+  handshakeAlarm = null;
+  transportError = reason;
+  for (const id of nativeRequests.keys()) recentNativeIds.set(id, Date.now());
+  nativeRequests.clear();
+  pruneRecentIds();
+  for (const session of sessions.values()) {
+    if (["active", "paused"].includes(session.state))
+      revoke(session, "disconnected");
+  }
+  scheduleReconnect();
+  publish();
+}
+function ensureConnection({ resetBudget = false } = {}) {
+  if (connecting) {
+    // Lifecycle/manual reset requests must survive an in-progress MV3 restore.
+    return resetBudget
+      ? connecting.then(() => ensureConnection({ resetBudget: true }))
+      : connecting;
+  }
+  connecting = (async () => {
+    await initializeTransport();
+    if (nativePort) return;
+    if (resetBudget) {
+      await clearRetryAlarms();
+      retryAttempt = 0;
+      retryAt = null;
+      retryPaused = false;
+      retryAlarm = null;
+    }
+    if (retryPaused || (retryAt !== null && retryAt > Date.now())) return;
+    retryAt = null;
+    retryAlarm = null;
+    try {
+      openNativePort();
+    } catch (error) {
+      transportFailed(
+        error.message || "无法连接 Lumi，请检查 Browser User 设置。",
+      );
+    }
+  })().finally(() => {
+    connecting = null;
+  });
+  return connecting;
+}
+function transportStatus() {
+  return {
+    sessions: list(),
+    connected: nativeReady,
+    connecting: !!nativePort && !nativeReady,
+    transportError,
+    retry: {
+      attempt: retryAttempt,
+      maxAttempts: RETRY_DELAYS_MINUTES.length,
+      nextAttemptAt: retryAt,
+      paused: retryPaused,
+    },
+  };
+}
+
+// Bounded per-worker replay protection, in addition to Lumi's UUID request IDs.
 // A completed request is never executed twice, including after ambiguous input.
 const recentNativeIds = new Map();
 function pruneRecentIds() {
@@ -76,14 +208,34 @@ function errorJSON(e) {
     ...(e.details ? { details: e.details } : {}),
   };
 }
-function connectNative() {
+function openNativePort() {
   if (nativePort) return;
   const port = chrome.runtime.connectNative("com.lumiplug.browser");
   nativePort = port;
+  nativeReady = false;
+  handshakeAlarm = `lumi-browser-handshake-${crypto.randomUUID()}`;
+  void chrome.alarms
+    .create(handshakeAlarm, { when: Date.now() + 60000 })
+    .catch(() => {});
   transportError = "";
   port.onMessage.addListener((message) => {
+    if (nativePort !== port) return;
+    if (message?.type === "ready") {
+      if (nativeReady) return;
+      nativeReady = true;
+      retryAttempt = 0;
+      retryAt = null;
+      retryPaused = false;
+      retryAlarm = null;
+      void clearRetryAlarms(port).catch(() => {});
+      transportError = "";
+      if (handshakeAlarm) void chrome.alarms.clear(handshakeAlarm);
+      handshakeAlarm = null;
+      publish();
+      return;
+    }
     if (
-      nativePort !== port ||
+      !nativeReady ||
       typeof message?.id !== "string" ||
       !message.id ||
       message.id.length > 128
@@ -159,18 +311,12 @@ function connectNative() {
       });
   });
   port.onDisconnect.addListener(() => {
+    // A late callback from an old port must never revoke a newer connection.
+    if (nativePort !== port) return;
     const reason =
       chrome.runtime.lastError?.message ||
-      "MCP adapter disconnected. Authorize the tab again to reconnect.";
-    if (nativePort !== port) return;
-    nativePort = null;
-    transportError = reason;
-    for (const id of nativeRequests.keys()) recentNativeIds.set(id, Date.now());
-    nativeRequests.clear();
-    pruneRecentIds();
-    for (const s of sessions.values())
-      if (["active", "paused"].includes(s.state)) revoke(s, "disconnected");
-    publish();
+      "Lumi disconnected. Reconnect communication, then explicitly authorize tabs again.";
+    transportFailed(reason);
   });
   publish();
 }
@@ -213,6 +359,7 @@ function revoke(s, state = "revoked") {
   publish();
 }
 async function authorize(tabId) {
+  const consentEpoch = transportEpoch;
   const tab = await chrome.tabs.get(tabId);
   const origin = originOf(tab.url);
   for (const old of sessions.values())
@@ -230,6 +377,13 @@ async function authorize(tabId) {
       "Page navigated during authorization; authorize again.",
     );
   }
+  if (consentEpoch !== transportEpoch) {
+    await chrome.debugger.detach({ tabId }).catch(() => {});
+    throw new LumiError(
+      "cancelled",
+      "Connection changed during authorization; authorize again.",
+    );
+  }
   const s = {
     id: crypto.randomUUID(),
     tabId,
@@ -243,7 +397,11 @@ async function authorize(tabId) {
   sessions.set(s.id, s);
   try {
     await page(s, "snapshot");
-    connectNative();
+    if (consentEpoch !== transportEpoch || s.state !== "active")
+      throw new LumiError(
+        "cancelled",
+        "Connection changed during authorization; authorize again.",
+      );
     publish();
     return describe(s);
   } catch (e) {
@@ -436,8 +594,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   )
     return;
   (async () => {
-    if (message.type === "status")
-      return { sessions: list(), connected: !!nativePort, transportError };
+    if (message.type === "status") {
+      await ensureConnection();
+      return transportStatus();
+    }
+    if (message.type === "reconnect") {
+      await ensureConnection({ resetBudget: true });
+      return transportStatus();
+    }
     if (message.type === "command")
       return handleRequest(message.tool, message.args || {});
     if (message.type === "authorize") return authorize(message.tabId);
@@ -452,7 +616,13 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           "reauthorize_required",
           "Authorize this tab again to restore control.",
         );
+      const resumeEpoch = s.epoch;
       const tab = await chrome.tabs.get(s.tabId);
+      if (s.state !== "paused" || s.epoch !== resumeEpoch)
+        throw new LumiError(
+          "cancelled",
+          "Session changed while resuming; authorize again.",
+        );
       if (originOf(tab.url) !== s.origin) {
         revoke(s, "origin_changed");
         throw new LumiError("origin_changed", "Authorize the new origin.");
@@ -514,3 +684,31 @@ chrome.debugger.onDetach.addListener((source) => {
     }
   publish();
 });
+
+// Reconnecting restores only the communication channel. No tab is attached,
+// authorized, resumed, or replayed by any of these lifecycle paths.
+chrome.runtime.onStartup.addListener(() => {
+  void ensureConnection({ resetBudget: true });
+});
+chrome.runtime.onInstalled.addListener(() => {
+  void ensureConnection({ resetBudget: true });
+});
+chrome.alarms.onAlarm.addListener((alarm) => {
+  void (async () => {
+    await initializeTransport();
+    if (alarm.name === handshakeAlarm && nativePort && !nativeReady) {
+      const timedOutPort = nativePort;
+      transportFailed(
+        "Lumi connection handshake timed out. Check Browser User settings.",
+      );
+      timedOutPort.disconnect();
+      return;
+    }
+    if (alarm.name === EXHAUSTED_ALARM) return;
+    if (nativePort || retryPaused || alarm.name !== retryAlarm) return;
+    retryAt = null;
+    retryAlarm = null;
+    await ensureConnection();
+  })();
+});
+void ensureConnection();

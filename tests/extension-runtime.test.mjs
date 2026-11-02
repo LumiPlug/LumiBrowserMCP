@@ -31,6 +31,14 @@ globalThis.chrome = {
     id: "test",
     getURL: (p) => "chrome-extension://test/" + p,
     onMessage: event(),
+    onStartup: event(),
+    onInstalled: event(),
+  },
+  alarms: {
+    getAll: async () => [],
+    create: async () => {},
+    clear: async () => true,
+    onAlarm: event(),
   },
   action: { setBadgeText() {}, setBadgeBackgroundColor() {} },
   tabs: {
@@ -69,6 +77,8 @@ globalThis.chrome = {
   },
 };
 await import("../extension/background.js");
+await new Promise((resolve) => setTimeout(resolve, 0));
+port.onMessage.fire({ type: "ready" });
 const listener = chrome.runtime.onMessage.listeners[0];
 const send = (message) =>
   new Promise((resolve) =>

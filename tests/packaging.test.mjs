@@ -59,3 +59,28 @@ test("portable extension ZIP is deterministic, root-loadable, and checksummed", 
     await rm(temp, { recursive: true, force: true });
   }
 });
+
+test("published public key fixes the official extension identity without a private key", async () => {
+  const manifest = JSON.parse(await readFile(path.join(root, "extension/manifest.json"), "utf8"));
+  const digest = createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest("hex").slice(0, 32);
+  const id = [...digest].map((n) => String.fromCharCode(97 + parseInt(n, 16))).join("");
+  assert.equal(id, "hfhigjgopbjmojflbhhnahpfpnmiaman");
+  assert.ok(!manifest.key.includes("PRIVATE"));
+  assert.ok(manifest.permissions.includes("alarms"));
+  assert.ok(!manifest.permissions.includes("management"));
+  assert.equal(manifest.host_permissions, undefined);
+});
+
+test("Lumi branding includes Chrome-sized application icons and bounded metadata", async () => {
+  const manifest = JSON.parse(await readFile(path.join(root, "extension/manifest.json"), "utf8"));
+  assert.equal(manifest.name, "Lumi Browser — AI Browser Automation & MCP");
+  assert.ok(manifest.name.length <= 75);
+  assert.ok(manifest.description.length <= 132);
+  for (const size of [16, 32, 48, 128]) {
+    const png = await readFile(path.join(root, "extension", manifest.icons[size]));
+    assert.equal(png.subarray(1, 4).toString(), "PNG");
+    assert.equal(png.readUInt32BE(16), size);
+    assert.equal(png.readUInt32BE(20), size);
+    if (size !== 128) assert.equal(manifest.action.default_icon[size], manifest.icons[size]);
+  }
+});

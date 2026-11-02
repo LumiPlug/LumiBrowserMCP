@@ -25,15 +25,11 @@ header p {
   color: #c5b9e7;
   margin: 2px 0;
 }
-.orb {
+.brand-icon {
   width: 42px;
   height: 42px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  background: #8c68ff;
-  font-size: 28px;
-  box-shadow: 0 0 24px #6c48bd;
+  object-fit: contain;
+  flex: 0 0 auto;
 }
 main {
   padding: 16px;

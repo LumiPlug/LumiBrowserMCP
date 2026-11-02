@@ -1,6 +1,8 @@
 const $ = (id) => document.getElementById(id);
 let currentTab;
 let currentSession;
+let popupActionBusy = false;
+let renderedSessions = null;
 const labels = {
   active: "已授权 · 运行中",
   paused: "已暂停",
@@ -17,6 +19,8 @@ async function request(message) {
   return answer.result;
 }
 async function act(message) {
+  if (popupActionBusy) return;
+  popupActionBusy = true;
   $("error").textContent = "";
   for (const button of document.querySelectorAll("button"))
     button.disabled = true;
@@ -25,22 +29,44 @@ async function act(message) {
   } catch (e) {
     $("error").textContent = e.message;
   } finally {
-    await refresh();
+    try {
+      await refresh();
+    } catch (error) {
+      $("error").textContent = error.message;
+    }
+    popupActionBusy = false;
     $("authorize").disabled =
       !currentTab || !/^https?:/.test(currentTab.url || "");
     $("run").disabled = false;
+    $("reconnect").disabled = false;
   }
 }
-async function refresh() {
+async function refresh({ background = false } = {}) {
+  if (background && popupActionBusy) return;
   const status = await request({ type: "status" });
+  if (background && popupActionBusy) return;
   currentSession = status.sessions.find(
     (s) => s.tabId === currentTab?.id && s.state === "active",
   );
   $("connection").textContent = status.connected
     ? "● Lumi 已连接"
-    : `○ Lumi 未连接${status.transportError ? " · " + status.transportError : "（请先在 Lumi 设置中启用 Browser User）"}`;
+    : status.connecting
+      ? "◌ 正在连接 Lumi…"
+      : `○ Lumi 未连接${status.transportError ? " · " + status.transportError : "（请先在 Lumi 设置中启用 Browser User）"}`;
+  if (!status.connected && status.retry?.paused)
+    $("connection").textContent +=
+      " · 自动重试已暂停，请检查 Lumi 设置后手动重连。";
+  else if (!status.connected && status.retry?.nextAttemptAt)
+    $("connection").textContent +=
+      ` · 下次自动重试 ${new Date(status.retry.nextAttemptAt).toLocaleTimeString()}`;
+  const currentSessions = status.sessions.filter(
+    (s) => s.tabId === currentTab?.id,
+  );
+  const signature = JSON.stringify(currentSessions);
+  if (background && signature === renderedSessions) return;
+  renderedSessions = signature;
   $("sessions").replaceChildren();
-  for (const s of status.sessions.filter((s) => s.tabId === currentTab?.id)) {
+  for (const s of currentSessions) {
     const box = document.createElement("section");
     box.className = "session";
     const state = document.createElement("div");
@@ -72,6 +98,7 @@ async function refresh() {
     $("sessions").append(box);
   }
 }
+$("reconnect").addEventListener("click", () => act({ type: "reconnect" }));
 $("authorize").addEventListener("click", () =>
   act({ type: "authorize", tabId: currentTab.id }),
 );
@@ -105,6 +132,25 @@ $("run").addEventListener("click", async () => {
     $("result").textContent = e.message;
   } finally {
     $("run").disabled = false;
+    $("reconnect").disabled = false;
     await refresh();
   }
+});
+
+// Read-only popup refresh shows the asynchronous ready handshake immediately.
+// It never bypasses the worker's alarm budget and ends when this popup closes.
+let polling = false;
+const statusTimer = setInterval(async () => {
+  if (polling || popupActionBusy) return;
+  polling = true;
+  try {
+    await refresh({ background: true });
+  } catch {
+    $("connection").textContent = "无法读取 Lumi 连接状态，请重新打开扩展。";
+  } finally {
+    polling = false;
+  }
+}, 1000);
+window.addEventListener("unload", () => clearInterval(statusTimer), {
+  once: true,
 });

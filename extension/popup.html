@@ -8,14 +8,23 @@
   </head>
   <body>
     <header>
-      <div class="orb">✦</div>
+      <img
+        class="brand-icon"
+        src="icons/icon32.png"
+        alt=""
+        aria-hidden="true"
+      />
       <div>
         <h1>Lumi Browser</h1>
-        <p>你的标签页，你来掌控</p>
+        <p>AI Browser Automation &amp; MCP</p>
       </div>
     </header>
     <main>
-      <div id="connection" role="status">正在读取授权状态…</div>
+      <div id="connection" role="status">正在读取连接与授权状态…</div>
+      <button id="reconnect">重新连接 Lumi</button>
+      <p class="hint">
+        连接会自动尝试；重新连接只恢复通信，不会恢复标签页授权或重放动作。
+      </p>
       <section>
         <h2>当前标签页</h2>
         <p id="tabTitle"></p>
@@ -45,8 +54,7 @@
           </select></label
         ><label
           >参数 JSON<textarea id="args" rows="4" spellcheck="false">
-{}</textarea
-          >
+{}</textarea>
         </label>
         <p>
           sessionId
@@ -58,8 +66,10 @@
       <details>
         <summary>首次使用与安全</summary>
         <p>
-          Chrome 扩展执行页面操作；请先在 Lumi 的 Browser User 设置中启用连接并填写此扩展 ID。无需单独安装适配器。所有输入通过 Chrome 调试协议完成，不接管系统鼠标。
-          所有接入 Lumi 的 Agent 共享同一控制域，串行操作，不是逐 Agent 独立授权。
+          Chrome 扩展执行页面操作；请先在 Lumi 的 Browser User
+          设置中启用连接并填写此扩展 ID。无需单独安装其他程序。所有输入通过
+          Chrome 调试协议完成，不接管系统鼠标。 所有接入 Lumi 的 Agent
+          共享同一控制域，串行操作，不是逐 Agent 独立授权。
         </p>
         <p>
           Chrome
