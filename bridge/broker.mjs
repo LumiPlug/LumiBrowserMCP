@@ -113,22 +113,42 @@ export function createBroker({
       if (!c.role) {
         if (
           m.type !== "hello" ||
-          !["native", "mcp"].includes(m.role) ||
+          !["native", "mcp", "doctor"].includes(m.role) ||
           typeof m.token !== "string" ||
           Buffer.byteLength(m.token) !== Buffer.byteLength(token) ||
           !timingSafeEqual(Buffer.from(m.token), Buffer.from(token))
         )
           return c.destroy();
         c.role = m.role;
+        // Chrome supplies this origin argument to the native host. Same-user
+        // processes can impersonate peers; this is attribution, not strong auth.
+        c.origin = c.role === "native" && typeof m.origin === "string" &&
+          /^chrome-extension:\/\/[a-p]{32}\/$/.test(m.origin) ? m.origin : null;
         clearTimeout(hello);
         if (c.role === "mcp") seenMcp = true;
-        idle();
+        if (c.role !== "doctor") idle();
         send(c, { type: "ready" });
+        return;
+      }
+      if (c.role === "doctor") {
+        if (m.type !== "status" || typeof m.id !== "string" || m.id.length > 256) return c.destroy();
+        if (m.expectedOrigin !== undefined && (typeof m.expectedOrigin !== "string" || !/^chrome-extension:\/\/[a-p]{32}\/$/.test(m.expectedOrigin))) return c.destroy();
+        const native = [...clients].filter(client => client.role === "native" && (!m.expectedOrigin || client.origin === m.expectedOrigin));
+        const matchingSessions = [...sessions.values()].filter(session => native.includes(session.native));
+        send(c, {
+          type: "status", id: m.id,
+          originMatched: !!m.expectedOrigin,
+          nativeHosts: native.length,
+          sessionPublishers: native.filter(client => client.publishedSessions).length,
+          sessions: matchingSessions.length,
+          activeSessions: matchingSessions.filter(session => session.item.state === "active").length
+        });
         return;
       }
       if (c.role === "native" && m.type === "sessions") {
         if (!Array.isArray(m.sessions) || m.sessions.length > 200)
           return c.destroy();
+        c.publishedSessions = true;
         const ids = new Set(m.sessions.map((s) => s?.id));
         for (const id of c.sessions)
           if (!ids.has(id)) {
@@ -260,7 +280,7 @@ export function createBroker({
           send(p.native, { type: "cancel", id: p.id });
         }
       }
-      if (!closing) idle();
+      if (!closing && c.role !== "doctor") idle();
     });
   });
   server.shutdown = () => {
@@ -281,6 +301,7 @@ export async function connect(
   role,
   token,
   connectionFactory = net.createConnection,
+  metadata = {},
 ) {
   return new Promise((resolve, reject) => {
     const socket = connectionFactory(address),
@@ -303,7 +324,7 @@ export async function connect(
     frames.on("error", () => socket.destroy());
     socket.once("connect", () => {
       try {
-        writeFrame(socket, { type: "hello", role, token });
+        writeFrame(socket, { type: "hello", role, token, origin: metadata.origin });
       } catch (e) {
         bad(e);
       }
@@ -318,13 +339,13 @@ export async function connect(
     });
   });
 }
-export async function connectOrLaunch(role) {
+export async function connectOrLaunch(role, metadata = {}) {
   const { dir, address, token } = endpoint(),
     lock = path.join(dir, "startup.lock"),
     deadline = Date.now() + 12000;
   while (Date.now() < deadline) {
     try {
-      return await connect(address, role, token);
+      return await connect(address, role, token, undefined, metadata);
     } catch {}
     let owns = false;
     try {
@@ -339,7 +360,7 @@ export async function connectOrLaunch(role) {
     if (owns)
       try {
         try {
-          return await connect(address, role, token);
+          return await connect(address, role, token, undefined, metadata);
         } catch {}
         if (process.platform !== "win32")
           try {
@@ -360,7 +381,7 @@ export async function connectOrLaunch(role) {
         while (Date.now() < until) {
           await new Promise((r) => setTimeout(r, 75));
           try {
-            return await connect(address, role, token);
+            return await connect(address, role, token, undefined, metadata);
           } catch {}
         }
       } finally {

@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { Frames, writeFrame, TOOLS, validate } from "./protocol.mjs";
+import { Frames, writeFrame, TOOLS, validate, MAX_FRAME } from "./protocol.mjs";
 import { connectOrLaunch } from "./broker.mjs";
 export async function nativeHost(
   input = process.stdin,
   output = process.stdout,
-  factory = () => connectOrLaunch("native"),
+  factory = () => connectOrLaunch("native", {
+    origin: process.argv.find(arg => /^chrome-extension:\/\/[a-p]{32}\/$/.test(arg)),
+  }),
 ) {
   const { socket, frames } = await factory(),
     incoming = new Frames(true);
@@ -58,8 +60,8 @@ export function mcpHost(
   };
   const rpcError = (id, code, message) =>
     send({ jsonrpc: "2.0", id, error: { code, message } });
-  const result = (id, m) =>
-    send({
+  const result = (id, m) => {
+    const response = {
       jsonrpc: "2.0",
       id,
       result: {
@@ -67,13 +69,24 @@ export function mcpHost(
           {
             type: "text",
             text: JSON.stringify(
-              m.error ? { error: m.error } : (m.result ?? null),
-            ),
-          },
+              m.error ? { error: m.error } : m.result ?? null
+            )
+          }
         ],
-        isError: !!m.error,
-      },
-    });
+        isError: !!m.error
+      }
+    };
+    if (Buffer.byteLength(JSON.stringify(response)) > MAX_FRAME) {
+      response.result = {
+        isError: true,
+        content: [{ type: "text", text: JSON.stringify({ error: {
+          code: "response_too_large",
+          message: "Browser response exceeds the MCP frame limit after encoding. The operation may have executed; do not automatically retry. Observe a smaller text region or inspect the page."
+        } }) }]
+      };
+    }
+    send(response);
+  };
   async function getConnection() {
     if (connection && !connection.socket.destroyed) return connection;
     if (opening) return opening;

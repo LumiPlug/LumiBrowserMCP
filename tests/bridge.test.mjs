@@ -96,15 +96,15 @@ async function setup(opts = {}) {
   broker.listen(address);
   await once(broker, "listening");
   const peers = [];
-  const dial = (role, credential = token) =>
-    connect(address, role, credential, transport.connectionFactory);
+  const dial = (role, credential = token, metadata = {}) =>
+    connect(address, role, credential, transport.connectionFactory, metadata);
   return {
     broker,
     address,
     token,
     dial,
-    async client(role) {
-      const c = await dial(role);
+    async client(role, metadata = {}) {
+      const c = await dial(role, token, metadata);
       c.next = inbox(c.frames);
       peers.push(c);
       return c;
@@ -396,7 +396,9 @@ test("real local IPC handshake where OS sandbox allows sockets", async (t) => {
     const c = await connect(address, "mcp", token);
     c.socket.destroy();
   } finally {
+    const closed = broker.listening ? once(broker, "close") : null;
     broker.shutdown();
+    if (closed) await closed;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -495,4 +497,95 @@ test("help exits without runtime startup", async () => {
   child.stdout.on("data", (b) => chunks.push(b));
   assert.equal((await once(child, "exit"))[0], 0);
   assert.match(Buffer.concat(chunks).toString(), /Lumi Browser MCP/);
+});
+
+test("doctor sees only counts, cannot operate tools or take session ownership", async () => {
+  const s = await setup();
+  try {
+    const m = await s.client("mcp"), n = await s.client("native"), d = await s.client("doctor");
+    writeFrame(d.socket, { type: "status", id: "before" });
+    assert.equal((await d.next()).sessionPublishers, 0);
+    writeFrame(n.socket, { type: "sessions", sessions: [shared] });
+    await delay(10);
+    writeFrame(d.socket, { type: "status", id: "after" });
+    const status = await d.next();
+    assert.equal(status.nativeHosts, 1);
+    assert.equal(status.sessionPublishers, 1);
+    assert.equal(status.activeSessions, 1);
+    assert.equal(JSON.stringify(status).includes(shared.origin), false);
+    const closed = once(d.socket, "close");
+    writeFrame(d.socket, { type: "request", id: "forbidden", tool: "click", args: { sessionId: shared.id, ref: "r" } });
+    await closed;
+    assert.equal(s.broker.listening, true);
+    writeFrame(m.socket, { type: "request", id: "normal", tool: "snapshot", args: { sessionId: shared.id } });
+    const request = await n.next();
+    assert.equal(request.tool, "snapshot");
+    writeFrame(n.socket, { type: "response", id: request.id, result: { ok: true } });
+    assert.equal((await m.next()).result.ok, true);
+  } finally {
+    await s.stop();
+  }
+});
+test("doctor closing does not revoke a native-only session or change startup grace", async () => {
+  const s = await setup({ startupGraceMs: 140, idleGraceMs: 10 });
+  try {
+    const n = await s.client("native"), d = await s.client("doctor");
+    writeFrame(n.socket, { type: "sessions", sessions: [shared] });
+    d.socket.destroy();
+    await delay(40);
+    assert.equal(s.broker.listening, true);
+    assert.equal(n.socket.destroyed, false);
+    await once(s.broker, "close");
+  } finally {
+    await s.stop();
+  }
+});
+test("MCP result escaping overflow returns bounded tool error without closing client", async () => {
+  const input = new PassThrough(), output = new PassThrough(), outFrames = new Frames(), socket = new PassThrough(), responses = new PassThrough({ objectMode: true });
+  output.pipe(outFrames);
+  const next = inbox(outFrames), requests = new Frames();
+  socket.pipe(requests);
+  const requestNext = inbox(requests), host = mcpHost(input, output, async () => ({ socket, frames: responses }));
+  try {
+    writeFrame(input, { jsonrpc: "2.0", id: "large", method: "tools/call", params: { name: "read_text", arguments: { sessionId: "s" } } });
+    const request = await requestNext();
+    responses.write({ type: "response", id: request.id, result: { text: "\\".repeat(3e5) } });
+    const reply = await next();
+    assert.equal(reply.result.isError, true);
+    assert.equal(JSON.parse(reply.result.content[0].text).error.code, "response_too_large");
+    writeFrame(input, { jsonrpc: "2.0", id: "still-open", method: "ping" });
+    assert.deepEqual((await next()).result, {});
+  } finally {
+    host.close();
+  }
+});
+
+test('doctor expected origin filters different native extensions and originless hosts', async () => {
+  const s = await setup();
+  const first = 'chrome-extension://' + 'a'.repeat(32) + '/';
+  const second = 'chrome-extension://' + 'b'.repeat(32) + '/';
+  try {
+    await s.client('mcp');
+    const a = await s.client('native', {origin:first});
+    const b = await s.client('native', {origin:second});
+    const originless = await s.client('native');
+    const d = await s.client('doctor');
+    writeFrame(a.socket, {type:'sessions',sessions:[{...shared,id:'first'}]});
+    writeFrame(b.socket, {type:'sessions',sessions:[{...shared,id:'second',state:'paused'}]});
+    writeFrame(originless.socket, {type:'sessions',sessions:[{...shared,id:'no-origin'}]});
+    await delay(10);
+    for (const [origin,active] of [[first,1],[second,0]]) {
+      writeFrame(d.socket,{type:'status',id:origin,expectedOrigin:origin});
+      const status=await d.next();
+      assert.equal(status.originMatched,true);
+      assert.equal(status.nativeHosts,1);
+      assert.equal(status.sessionPublishers,1);
+      assert.equal(status.activeSessions,active);
+      assert.equal(status.sessions,1);
+    }
+    writeFrame(d.socket,{type:'status',id:'missing',expectedOrigin:'chrome-extension://'+'c'.repeat(32)+'/'});
+    const missing=await d.next();
+    assert.equal(missing.nativeHosts,0);
+    assert.equal(missing.activeSessions,0);
+  } finally { await s.stop(); }
 });

@@ -1,11 +1,22 @@
 import fs from "node:fs";
+import { doctorCLI } from "./doctor.mjs";
+import { runSetup } from "../scripts/setup.mjs";
 import { endpoint, createBroker } from "./broker.mjs";
 import { mcpHost, nativeHost } from "./hosts.mjs";
 async function main() {
+  if (process.argv.includes("--setup")) {
+    const result = await runSetup(process.argv.slice(2).filter(arg => arg !== "--setup"));
+    process.exitCode = result?.exitCode ?? 0;
+    return;
+  }
   if (process.argv.includes("--help")) {
     process.stdout.write(
-      "Lumi Browser MCP adapter\nUsage: lumi-browser-adapter [--mcp | --native | --broker]\nDefault: MCP stdio. Chrome origin arguments select native messaging.\n",
+      "Lumi Browser MCP adapter\nUsage: lumi-browser-adapter [--mcp | --native | --broker | --doctor [--extension-id ID] [--json]]\nSetup: --setup --extension-id ID [--dry-run | --apply] [--client codex | snippet]\nDefault: MCP stdio. Chrome origin arguments select native messaging.\n",
     );
+    return;
+  }
+  if (process.argv.includes("--doctor")) {
+    process.exitCode = await doctorCLI();
     return;
   }
   if (process.argv.includes("--broker")) {

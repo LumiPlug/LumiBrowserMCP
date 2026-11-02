@@ -79,6 +79,15 @@ for (const name of platform === "darwin"
   await copyFile(path.join("scripts", name), dest);
   if (platform === "darwin") await chmod(dest, 0o755);
 }
+await writeFile(
+  path.join(stage, "setup-manifest.json"),
+  JSON.stringify({
+    platform,
+    arch: process.arch,
+    sha256: createHash("sha256").update(await readFile(exe)).digest("hex"),
+  }, null, 2) + "\n",
+);
+await copyFile("docs/AGENT_SETUP.md", path.join(stage, "AGENT_SETUP.md"));
 // Verify the embedded entrypoint without starting a broker or writing credentials.
 const smoke = spawnSync(exe, ["--help"], { encoding: "utf8", timeout: 10000 });
 if (smoke.error || smoke.status !== 0 || !/Lumi/i.test(smoke.stdout || "")) {
@@ -87,6 +96,15 @@ if (smoke.error || smoke.status !== 0 || !/Lumi/i.test(smoke.stdout || "")) {
   );
 }
 console.log(smoke.stdout.trim());
+// Exercise the actual packaged setup parser, platform/CPU and binary checksum
+// without registry writes, home-directory writes or launching a broker/client.
+const setupSmoke = spawnSync(exe, ["--setup", "--extension-id", "a".repeat(32), "--client", "snippet"], {
+  encoding: "utf8", timeout: 10000,
+});
+if (setupSmoke.error || setupSmoke.status !== 0 || JSON.parse(setupSmoke.stdout || "{}").dryRun !== true) {
+  throw new Error(`SEA setup dry-run smoke failed: ${setupSmoke.error || setupSmoke.stderr || setupSmoke.stdout}`);
+}
+console.log("SEA setup dry-run: passed (no installation)");
 const zip = path.resolve(
   "dist",
   `lumi-browser-adapter-${platform}-${process.arch}.zip`,

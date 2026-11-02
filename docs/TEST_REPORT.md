@@ -1,6 +1,6 @@
 # 首版测试报告
 
-状态：开发预览版，已提交 draft PR，未合并、未安装到用户电脑。以下为 2026-11-02 云端工作区实际验证；不代表用户 PRO 或 Windows 机器验收。
+状态：开发预览版，已提交 draft PR，未合并、未安装到用户电脑。用户已接手真实 Chrome 实机测试。以下为 2026-11-02 云端工作区实际验证；不代表用户 PRO 或 Windows 机器验收。
 
 ## 验证分类
 
@@ -10,7 +10,7 @@
 - Windows/macOS Actions 构建与产物：首轮全部通过，Linux/Windows x64/macOS x64/macOS arm64 均 44/44 测试通过、0 跳过，包含真实 OS IPC handshake；三个 SEA 构建及内置 `--help` 通过。
   - 验证 commit：`9c2badbfe5d14c035e8638fc03776f760bbb18a3`。
   - [首轮工作流](https://github.com/LumiPlug/LumiBrowserMCP/actions/runs/41401323605)；扩展 ZIP、3 个平台适配器 ZIP 及 SHA256 已上传 artifacts。
-  - 工作流依赖由旧 Node20 Actions 升级官方 v7 后，将以最新 commit 再次核验。
+  - 官方 Actions v7 的复验亦已通过：commit `f37997fe9483382691f1733ce4cb75098dc6ffc0`，[run 41401722607](https://github.com/LumiPlug/LumiBrowserMCP/actions/runs/41401722607)，四 job 成功、各 44/44。
 - macOS 真实 Chrome 订单端到端：未验收。
 - Windows 真实 Chrome 订单端到端：未验收。
 - 另一应用选中文字/不移动系统光标：未验收。
@@ -27,3 +27,13 @@
 - macOS arm64：`aaf6961f2c5671c7759558ce9710dbc9a408c800726cecd3414cfc1fdb6fa23f`
 
 不同构建的适配器 ZIP 字节可能变化，请优先使用同一 artifact 内的 SHA256 文件。
+
+## 一次性配置增量
+
+本轮云端最终总检：68 项，67 通过、1 真实 IPC 环境限制跳过；语法检查与扩展 ZIP 构建通过。
+
+- `--setup` 默认只读预演，不启动 Codex、安装程序或 broker。`--apply` 才做用户级宿主注册和明确选择的 Codex 配置；其他客户端仅 snippet。
+- 校验包平台/CPU/最终二进制 SHA256，拒绝同名异配置、符号链接和未知安装目录；配置与被替换安装文件保留本地私密备份。
+- 自动调用分层 `--doctor`；真实连接未就绪不会声称成功。Doctor 连接不计为 MCP 客户端，不维持 broker 存活，也不导致现有会话撤销。
+- 自动测试覆盖预演无写入/无外部进程、平台/CPU/哈希拒绝、Codex 合并/备份/冲突/卸载，以及诊断注册与真实连接证据；安装测试使用临时目录与 mock，不在用户电脑注册。
+- 新适配器的 CI 增加真实 SEA `--setup` 预演 smoke，不执行真实安装。最新增量 CI 结果与精确 commit 见 PR #1 最新验证评论；不以先前成功 run 代替本次验证。
