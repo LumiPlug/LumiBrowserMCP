@@ -47,6 +47,9 @@ export function invalidate(session, state) {
 }
 
 export const TOOL_NAMES = [
+  "open_tab",
+  "navigate",
+  "reload",
   "list_sessions",
   "snapshot",
   "read_text",
@@ -63,12 +66,15 @@ export function validateRemoteRequest(message) {
   )
     throw new LumiError(
       "unknown_tool",
-      "Only the seven documented browser tools are available.",
+      "Only the documented browser tools are available.",
     );
   const args = message.args === undefined ? {} : message.args;
   if (!args || typeof args !== "object" || Array.isArray(args))
     throw new LumiError("invalid_argument", "args must be a JSON object.");
   const fields = {
+    open_tab: ["url"],
+    navigate: ["url", "sessionId"],
+    reload: ["sessionId"],
     list_sessions: [],
     snapshot: ["sessionId"],
     read_text: ["sessionId", "ref"],
@@ -81,8 +87,13 @@ export function validateRemoteRequest(message) {
     throw new LumiError("invalid_argument", "Unknown tool argument.");
   if (new TextEncoder().encode(JSON.stringify(args)).length > 512 * 1024)
     throw new LumiError("invalid_argument", "Tool arguments exceed 512 KiB.");
+  if (fields.includes("url")) {
+    if (typeof args.url !== "string" || args.url.length > 2048)
+      throw new LumiError("invalid_argument", "Invalid navigation URL.");
+    originOf(args.url);
+  }
   if (
-    message.tool !== "list_sessions" &&
+    fields.includes("sessionId") &&
     (typeof args.sessionId !== "string" ||
       !args.sessionId ||
       args.sessionId.length > 128)

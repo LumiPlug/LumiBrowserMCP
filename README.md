@@ -2,7 +2,7 @@
 
 **本仓库现在只交付一份跨 Windows/macOS 通用的 Chrome MV3 扩展。** MCP 与连接管理运行在 [Lumi](https://github.com/LumiPlug/Lumi) 的既有 Core 进程；扩展通过固定 loopback WebSocket 直连，不安装 Native Host、不启动独立适配器进程。
 
-> 0.5.2 开发预览版需要包含 **Browser User** 设置的 Lumi 集成构建，见 [Lumi PR #17](https://github.com/LumiPlug/Lumi/pull/17)。旧 main/发行版没有此入口时，不能仅更新扩展就认为迁移完成。两个 PR 均待审阅，不自动合并。
+> 0.5.3 开发预览版改进了自定义菜单项的识别。Lumi v0.1.7-preview.28 可使用现有快照和点击工具。新建标签页、当前页导航和刷新另需提供相应 MCP 工具的 Lumi Core。
 
 ## 三步使用
 
@@ -61,3 +61,7 @@ node fixtures/server.mjs
 为避免无限占用浏览器调试连接，开发版同时接入上限为 200 个标签页；超限/传输截断会在扩展状态明确提示。关闭标签后可补入符合规则的页面。权限范围“全部普通网页”不代表无限并发连接。
 
 配对凭据不匹配时不会自动抹除或替换旧凭据；错误状态下可明确确认“重新配对”。扩展只清除自己的凭据，还需在 Lumi 同样确认重新配对，随后在新的登记窗口自动首次信任；单边重置不代表已经连接。
+
+## 标签页导航
+
+`Lumi.browser_open_tab({url})` 在后台新建标签页。`Lumi.browser_navigate({sessionId, url})` 在指定标签页打开网址，`Lumi.browser_reload({sessionId})` 刷新该页。目标必须是允许的 HTTP(S) 网址。返回 dispatched 表示 Chrome 已接收操作；加载后重新列出会话并获取快照。结果未知时不得自动重试。需要同时更新 Lumi Core 和扩展。

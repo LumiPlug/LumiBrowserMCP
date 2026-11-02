@@ -151,23 +151,44 @@ export function pageOperation(operation, args = {}) {
   if (operation === "snapshot") {
     registry.generation++;
     registry.refs.clear();
-    const interactive = [
-      ...document.querySelectorAll(
-        'a[href],button,input,textarea,select,[role],[contenteditable="true"],summary',
-      ),
-    ];
-    const scrollable = [...document.querySelectorAll("*")]
-      .slice(0, 20000)
-      .filter((el) => {
-        if (
-          el.scrollHeight <= el.clientHeight &&
-          el.scrollWidth <= el.clientWidth
+    const controlSelector =
+      'a,button,input,textarea,select,[role],[onclick],[tabindex],[contenteditable="true"],summary';
+    const interactive = [...document.querySelectorAll(controlSelector)];
+    const elements = [...document.querySelectorAll("*")].slice(0, 20000);
+    // Delegated menus often attach one listener to a container. Expose the
+    // individual text target so the normal hit-test and CDP click can bubble.
+    const menuLabels = elements.filter((el) => {
+      if (
+        !el.childNodes ||
+        el.closest(
+          "a,button,input,textarea,select,[role=menuitem],[role=button]",
         )
-          return false;
-        const style = getComputedStyle(el);
-        return /auto|scroll/.test(style.overflowX + style.overflowY);
-      });
-    const nodes = [...new Set([...interactive, ...scrollable])]
+      )
+        return false;
+      if (
+        ![...el.childNodes].some(
+          (node) => node.nodeType === 3 && node.textContent.trim(),
+        )
+      )
+        return false;
+      const label = el.textContent.trim();
+      if (!label || label.length > 120 || /[\r\n]/.test(label)) return false;
+      return (
+        getComputedStyle(el).cursor === "pointer" ||
+        !!el.closest(
+          'li,menu,[role=menu],[role=listbox],[class*="dropdown" i],[class*="popover" i],[class*="menu" i]',
+        )
+      );
+    });
+    const scrollable = elements.filter((el) => {
+      if (
+        el.scrollHeight <= el.clientHeight &&
+        el.scrollWidth <= el.clientWidth
+      )
+        return false;
+      return isScrollable(el);
+    });
+    const nodes = [...new Set([...interactive, ...menuLabels, ...scrollable])]
       .filter(visible)
       .slice(0, 500);
     const fullText = document.body?.innerText || "";
