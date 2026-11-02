@@ -10,8 +10,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -19,7 +21,7 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lumi-browser-extension
           path: dist/lumi-browser-extension.zip*
@@ -38,8 +40,10 @@ jobs:
             arch: x64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           architecture: ${{ matrix.arch }}
@@ -48,7 +52,7 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run build:adapter
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lumi-browser-adapter-${{ runner.os }}-${{ matrix.arch }}
           path: dist/lumi-browser-adapter-*.zip*
