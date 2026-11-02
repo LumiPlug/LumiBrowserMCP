@@ -10,13 +10,13 @@ LumiBrowserMCP 只有 Chrome MV3 扩展。Lumi 内置 Browser User 服务复用�
 
 ## 授权与身份
 
-Lumi Browser User 默认关闭，启用及注册须桌面主窗口用户确认，MCP 无此管理能力。Native Messaging manifest 精确指定扩展 ID。每个标签页仍需用户在扩展授权；不会从磁盘恢复旧授权。
+Lumi Browser User 默认关闭，启用及注册须桌面主窗口用户确认，MCP 无此管理能力。Native Messaging manifest 精确指定扩展 ID。用户首次确认普通 HTTP(S) 全部允许，并由扩展请求 Chrome 必要主机权限。旧逐页版本偏好不静默升级；Core 下发版本化禁止链接策略。不会恢复旧会话/ref/队列；重连只为允许且未暂停/接管的页创建新会话。
 
 首版 Lumi MCP 使用共享凭据与无状态 HTTP，因此所有 Agent 是单一共享控制域，全局串行，**不提供逐 Agent 身份隔离**。不把请求 ID 当可信客户端身份；同用户恶意程序不在 IPC 强隔离承诺内。
 
 ## 会话与精确输入
 
-会话随机 ID 绑定标签页、来源、状态和 epoch。跨源导航、关闭页面、调试器/native断开、Core停用均撤销。每次副作用前检查epoch、原节点及语义、遮挡与焦点；使用 viewport CSS 像素，不乘DPR，不激活窗口。
+会话随机 ID 绑定标签页、来源、状态和 epoch。跨源导航、关闭页面、调试器/native断开、Core停用均撤销。每次读取和副作用前检查当前 URL、禁止策略版本与epoch、原节点及语义、遮挡与焦点；使用 viewport CSS 像素，不乘DPR，不激活窗口。
 
 快照更新 ref 集合；节点被替换或虚拟列表同节点语义变化会失效，不按相似selector重试。虚拟 Lumi 光标 pointer-events:none，不拦用户点击。
 
@@ -24,6 +24,8 @@ CDP 输入不是原子事务；滚动、悬停也可能触发页面事件。派�
 
 ## 传输契约
 
-Native Messaging 使用4字节小端长度加JSON；消息为request(id/tool/args)、response(id/result或error)、sessions、cancel。Lumi负责本机IPC/工具schema/生命周期，本扩展只接受用户授权的sessionId。原生消息有界、重复请求不重放；服务worker重启fail closed。
+Native Messaging 使用4字节小端长度加JSON；消息为ready、policy(epoch/blockedUrls)、request(id/tool/args/policyEpoch)、response(id/result或error)、sessions、cancel。Lumi负责本机IPC/工具schema/生命周期，本扩展只接受最新策略允许且有Chrome访问权限的sessionId。原生消息有界、重复请求不重放；服务worker重启fail closed。
 
 只支持普通顶层DOM；跨源iframe、closed Shadow DOM和canvas不声明支持。页面内容仅作为数据，不绕过验证码、登录确认或系统权限。真实平台、商店发布/签名不是模拟测试可证明的事项。
+
+禁止匹配规则：URL解析后移除query和fragment，精确origin+pathname；拒绝URL credentials与非http/https；不模糊子域或尾斜杠。不把页面内容当策略指令，策略只能经Lumi宿主用户确认维护。

@@ -1,8 +1,10 @@
+import { normalizePolicyUrl } from "./core.mjs";
 const $ = (id) => document.getElementById(id);
 let currentTab;
 let currentSession;
 let popupActionBusy = false;
 let renderedSessions = null;
+let autoConsentGranted = false;
 const labels = {
   active: "已授权 · 运行中",
   paused: "已暂停",
@@ -12,6 +14,10 @@ const labels = {
   detached: "调试连接已断开",
   closed: "标签页已关闭",
   revoked: "已撤销",
+  blocked: "此链接已禁止",
+  permission_required: "等待网站权限",
+  policy_changed: "正在同步网站设置",
+  navigation_changed: "正在连接新页面",
 };
 async function request(message) {
   const answer = await chrome.runtime.sendMessage(message);
@@ -35,8 +41,7 @@ async function act(message) {
       $("error").textContent = error.message;
     }
     popupActionBusy = false;
-    $("authorize").disabled =
-      !currentTab || !/^https?:/.test(currentTab.url || "");
+    $("authorize").disabled = autoConsentGranted;
     $("run").disabled = false;
     $("reconnect").disabled = false;
   }
@@ -45,6 +50,26 @@ async function refresh({ background = false } = {}) {
   if (background && popupActionBusy) return;
   const status = await request({ type: "status" });
   if (background && popupActionBusy) return;
+  autoConsentGranted = status.autoConsent && status.hostGranted;
+  $("authorize").disabled = autoConsentGranted;
+  $("authorize").textContent = autoConsentGranted
+    ? "已允许普通网页自动操作"
+    : "允许普通网页自动操作";
+  let currentUrl = null;
+  try {
+    currentUrl = normalizePolicyUrl(currentTab?.url);
+  } catch {}
+  $("page-policy").textContent = !currentUrl
+    ? "Chrome 内部页面、文件页面等不允许操作。"
+    : status.blockedUrls?.includes(currentUrl)
+      ? "此链接已在 Lumi 中禁止（不含参数和片段）。"
+      : !status.policyReady
+        ? "等待 Lumi 同步网站设置；当前不会操作页面。"
+        : "此链接默认允许；暂停或接管优先于自动连接。";
+  $("session-limit").textContent =
+    status.limitReached || status.publicationTruncated
+      ? `最多同时接入 ${status.sessionLimit || 200} 个页面；部分允许的页面尚未接入或未完整发布。关闭已接入的标签页后会补入。`
+      : `普通网页默认允许，最多同时接入 ${status.sessionLimit || 200} 个页面。`;
   currentSession = status.sessions.find(
     (s) => s.tabId === currentTab?.id && s.state === "active",
   );
@@ -62,6 +87,15 @@ async function refresh({ background = false } = {}) {
   const currentSessions = status.sessions.filter(
     (s) => s.tabId === currentTab?.id,
   );
+  const held = status.tabHolds?.[currentTab?.id];
+  if (held && !currentSessions.some((session) => session.state === held))
+    currentSessions.push({
+      id: `held-${currentTab.id}`,
+      tabId: currentTab.id,
+      title: "",
+      origin: "",
+      state: held,
+    });
   const signature = JSON.stringify(currentSessions);
   if (background && signature === renderedSessions) return;
   renderedSessions = signature;
@@ -80,36 +114,51 @@ async function refresh({ background = false } = {}) {
       ? [
           ["pause", "暂停"],
           ["takeover", "立即接管", true],
-          ["disconnect", "断开"],
         ]
-      : s.state === "paused"
-        ? [
-            ["resume", "继续"],
-            ["takeover", "立即接管", true],
-            ["disconnect", "断开"],
-          ]
+      : ["paused", "taken_over"].includes(s.state)
+        ? [["resume_tab", "恢复此标签页"]]
         : []) {
       const button = document.createElement("button");
       button.textContent = label;
       if (danger) button.className = "danger";
-      button.addEventListener("click", () => act({ type, sessionId: s.id }));
+      button.addEventListener("click", () =>
+        act({ type, sessionId: s.id, tabId: currentTab.id }),
+      );
       box.append(button);
     }
     $("sessions").append(box);
   }
 }
 $("reconnect").addEventListener("click", () => act({ type: "reconnect" }));
-$("authorize").addEventListener("click", () =>
-  act({ type: "authorize", tabId: currentTab.id }),
-);
+$("authorize").addEventListener("click", async () => {
+  if (popupActionBusy) return;
+  popupActionBusy = true;
+  $("authorize").disabled = true;
+  try {
+    // Must remain directly inside the explicit user gesture, never in the worker.
+    const granted = await chrome.permissions.request({
+      origins: ["http://*/*", "https://*/*"],
+    });
+    popupActionBusy = false;
+    if (!granted) {
+      $("error").textContent = "未授予网站权限，Lumi 不会自动操作网页。";
+      return;
+    }
+    await act({ type: "enable_auto" });
+  } catch (error) {
+    $("error").textContent = error.message;
+  } finally {
+    popupActionBusy = false;
+    $("authorize").disabled = autoConsentGranted;
+  }
+});
 try {
   [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   $("tabTitle").textContent = currentTab?.title || "未找到标签页";
   $("origin").textContent = currentTab?.url
     ? new URL(currentTab.url).origin
     : "";
-  $("authorize").disabled =
-    !currentTab || !/^https?:/.test(currentTab.url || "");
+  $("authorize").disabled = autoConsentGranted;
   await refresh();
 } catch (e) {
   $("error").textContent = e.message;

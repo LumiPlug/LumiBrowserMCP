@@ -185,3 +185,22 @@ test("large Chinese snapshots stay below the UTF-8 transport budget with explici
   const bytes = new TextEncoder().encode(JSON.stringify(result)).length;
   assert.ok(bytes < 700 * 1024, `Encoded snapshot is ${bytes} bytes`);
 });
+
+test("fresh session tokens invalidate old refs even when the document remains identical", () => {
+  const first = pageOperation("snapshot", { sessionToken: "session-one" });
+  const oldRef = first.controls[0].ref;
+  const second = pageOperation("snapshot", { sessionToken: "session-two" });
+  assert.notEqual(second.controls[0].ref, oldRef);
+  assert.equal(
+    pageOperation("read_text", { sessionToken: "session-two", ref: oldRef })
+      .error.code,
+    "stale_ref",
+  );
+  assert.equal(
+    pageOperation("snapshot", {
+      expectedOrigin: location.origin,
+      expectedUrl: location.href + "blocked",
+    }).error.code,
+    "navigation_changed",
+  );
+});

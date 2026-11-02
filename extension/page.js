@@ -7,11 +7,34 @@ export function pageOperation(operation, args = {}) {
         message: "Authorized origin no longer matches.",
       },
     };
+  if (
+    operation !== "remove_overlay" &&
+    args.expectedUrl &&
+    location.href !== args.expectedUrl
+  )
+    return {
+      error: {
+        code: "navigation_changed",
+        message: "Document URL changed before the operation.",
+      },
+    };
   const key = "__lumi_browser_mcp_v1__";
   let registry = globalThis[key];
-  if (!registry || registry.document !== document) {
+  if (
+    operation === "remove_overlay" &&
+    registry &&
+    registry.sessionToken !== args.sessionToken
+  )
+    return { ok: true };
+  if (
+    !registry ||
+    registry.document !== document ||
+    registry.sessionToken !== args.sessionToken
+  ) {
+    registry?.overlay?.remove();
     registry = globalThis[key] = {
       document,
+      sessionToken: args.sessionToken,
       prefix: crypto.randomUUID(),
       generation: 0,
       refs: new Map(),

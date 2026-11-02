@@ -6,6 +6,7 @@ const event = () => ({
     this.listeners.push(fn);
   },
   fire(...args) {
+    if (args[0]?.type === "request") args[0] = { policyEpoch: 1, ...args[0] };
     this.listeners.forEach((f) => f(...args));
   },
 });
@@ -40,9 +41,23 @@ globalThis.chrome = {
     clear: async () => true,
     onAlarm: event(),
   },
+  permissions: {
+    contains: async () => true,
+    onAdded: event(),
+    onRemoved: event(),
+  },
+  storage: {
+    local: {
+      get: async () => ({ lumiAutoConsent: true }),
+      set: async () => {},
+    },
+    session: { get: async () => ({}), set: async () => {} },
+  },
   action: { setBadgeText() {}, setBadgeBackgroundColor() {} },
   tabs: {
-    get: async () => ({ ...tab }),
+    get: async (id) => ({ ...tab, id }),
+    query: async () => [{ ...tab }],
+    onCreated: event(),
     onRemoved: event(),
     onUpdated: event(),
   },
@@ -79,8 +94,10 @@ globalThis.chrome = {
 await import("../extension/background.js");
 await new Promise((resolve) => setTimeout(resolve, 0));
 port.onMessage.fire({ type: "ready" });
+port.onMessage.fire({ type: "policy", epoch: 1, blockedUrls: [] });
+await new Promise((resolve) => setTimeout(resolve, 0));
 const listener = chrome.runtime.onMessage.listeners[0];
-const send = (message) =>
+const rawSend = (message) =>
   new Promise((resolve) =>
     listener(
       message,
@@ -89,6 +106,16 @@ const send = (message) =>
     ),
   );
 let id;
+const send = async (message) => {
+  const result = await rawSend(message);
+  if (message.type === "resume" && result.result)
+    id =
+      result.result.sessions.find(
+        (session) => session.tabId === 7 && session.state === "active",
+      )?.id ?? id;
+  return result;
+};
+
 test("extension runtime consent and CDP behavior", async (t) => {
   await t.test("reject page-origin messages", () => {
     let responded = false;
@@ -102,10 +129,12 @@ test("extension runtime consent and CDP behavior", async (t) => {
     );
     assert.equal(responded, false);
   });
-  await t.test("explicit authorization produces a session", async () => {
-    const r = await send({ type: "authorize", tabId: 7 });
-    assert.equal(r.result.state, "active");
-    id = r.result.id;
+  await t.test("accepted policy creates an allowed-page session", async () => {
+    const r = (await send({ type: "status" })).result.sessions.find(
+      (session) => session.tabId === 7,
+    );
+    assert.equal(r.state, "active");
+    id = r.id;
   });
   await t.test(
     "click dispatches CSS pixels without tab activation",
@@ -365,7 +394,11 @@ test("extension runtime consent and CDP behavior", async (t) => {
   await t.test(
     "native cancel stops pending request and only its session",
     async () => {
-      const other = (await send({ type: "authorize", tabId: 8 })).result.id;
+      chrome.tabs.onCreated.fire({ ...tab, id: 8 });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const other = (await send({ type: "status" })).result.sessions.find(
+        (session) => session.tabId === 8,
+      ).id;
       commands.length = 0;
       port.onMessage.fire({
         type: "request",
@@ -391,10 +424,12 @@ test("extension runtime consent and CDP behavior", async (t) => {
     async () => {
       tab.url = "https://other.example/";
       chrome.tabs.onUpdated.fire(7, { url: tab.url });
-      assert.equal(
-        (await send({ type: "status" })).result.sessions[0].state,
-        "origin_changed",
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const current = (await send({ type: "status" })).result.sessions.find(
+        (session) => session.tabId === 7,
       );
+      assert.notEqual(current.id, id);
+      assert.equal(current.origin, "https://other.example");
       assert.equal(
         (
           await send({
@@ -403,7 +438,7 @@ test("extension runtime consent and CDP behavior", async (t) => {
             args: { sessionId: id, ref: "r" },
           })
         ).error.code,
-        "cancelled",
+        "unknown_session",
       );
     },
   );

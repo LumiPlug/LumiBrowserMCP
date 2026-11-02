@@ -12,7 +12,16 @@ export function originOf(url) {
       "restricted_page",
       "Only HTTP(S) pages can be authorized.",
     );
+  if (parsed.username || parsed.password)
+    throw new LumiError(
+      "restricted_page",
+      "Credential-bearing URLs are not allowed.",
+    );
   return parsed.origin;
+}
+export function normalizePolicyUrl(url) {
+  const origin = originOf(url);
+  return origin + new URL(url).pathname;
 }
 export function assertLive(session, epoch) {
   if (session.state !== "active" || session.epoch !== epoch)

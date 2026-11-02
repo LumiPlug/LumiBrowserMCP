@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   originOf,
+  normalizePolicyUrl,
   enqueue,
   invalidate,
   assertLive,
@@ -101,4 +102,22 @@ test("native tool validation bounds names, values and encoded payload size", () 
     validateNativeRequest({ tool: "list_sessions", args: {} }),
     {},
   );
+});
+
+test("policy URL normalization ignores query/hash, preserves trailing slash, and rejects credentials", () => {
+  assert.equal(
+    normalizePolicyUrl("https://EXAMPLE.test:443/orders?token=synthetic#row"),
+    "https://example.test/orders",
+  );
+  assert.notEqual(
+    normalizePolicyUrl("https://example.test/orders"),
+    normalizePolicyUrl("https://example.test/orders/"),
+  );
+  for (const url of [
+    "https://user:password@example.test/orders",
+    "file:///tmp/test",
+    "chrome://settings",
+    "javascript:alert(1)",
+  ])
+    assert.throws(() => normalizePolicyUrl(url));
 });

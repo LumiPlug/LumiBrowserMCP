@@ -23,24 +23,29 @@
       <div id="connection" role="status">正在读取连接与授权状态…</div>
       <button id="reconnect">重新连接 Lumi</button>
       <p class="hint">
-        连接会自动尝试；重新连接只恢复通信，不会恢复标签页授权或重放动作。
+        连接会自动尝试；重新连接后仅按最新网站设置连接允许的页面；暂停、接管与旧动作不会自动恢复。
       </p>
       <section>
         <h2>当前标签页</h2>
         <p id="tabTitle"></p>
         <p id="origin"></p>
-        <button id="authorize" class="primary">授权当前标签页</button>
+        <button id="authorize" class="primary">允许普通网页自动操作</button>
         <p class="hint">
-          仅授权此标签页及当前网站来源。不会切换标签页或移动系统鼠标。跨站跳转后需重新授权。
+          首次点击需确认 Chrome 网站权限。普通 HTTP/HTTPS 网页默认允许；在 Lumi
+          的 Browser User
+          设置中禁止单个链接，匹配时忽略参数和片段。不会切换标签页或移动系统鼠标。
         </p>
       </section>
+      <p id="page-policy" class="hint"></p>
+      <p id="session-limit" class="hint"></p>
       <div id="sessions"></div>
       <p id="error" role="alert"></p>
       <details>
         <summary>诊断工具面板</summary>
         <p>
           此面板用于手动诊断；日常操作由通过 Lumi 连接的 Agent
-          发起。先授权，再获取快照，从结果复制 ref。每次快照会使旧 ref 失效。
+          发起。确认网站权限并连接后获取快照，从结果复制 ref。每次快照会使旧 ref
+          失效。
         </p>
         <label
           >工具<select id="tool">
@@ -76,7 +81,7 @@
           会显示调试提示，这是精确操作所需权限。页面文字仅作不可信数据。不要让代理擅自提交付款、发信或其他敏感操作。
         </p>
         <p>
-          暂停会取消待执行操作；立即接管会断开页面调试控制。已发出的动作无法撤回。
+          暂停和立即接管会取消待执行操作，并在本次浏览器会话内保留；导航、重连不会覆盖你的选择。点击“恢复此标签页”才解除。已发出的动作无法撤回。
         </p>
       </details>
     </main>

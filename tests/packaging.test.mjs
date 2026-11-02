@@ -69,6 +69,9 @@ test("published public key fixes the official extension identity without a priva
   assert.ok(manifest.permissions.includes("alarms"));
   assert.ok(!manifest.permissions.includes("management"));
   assert.equal(manifest.host_permissions, undefined);
+  assert.deepEqual(manifest.optional_host_permissions, ["http://*/*", "https://*/*"]);
+  assert.ok(manifest.permissions.includes("storage"));
+  assert.ok(!manifest.permissions.includes("tabs"));
 });
 
 test("Lumi branding includes Chrome-sized application icons and bounded metadata", async () => {

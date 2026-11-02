@@ -1,6 +1,7 @@
 import {
   LumiError,
   originOf,
+  normalizePolicyUrl,
   assertLive,
   enqueue,
   invalidate,
@@ -15,6 +16,207 @@ let handshakeAlarm = null;
 let transportEpoch = 0;
 let transportError = "";
 const nativeRequests = new Map();
+const HOST_ORIGINS = ["http://*/*", "https://*/*"];
+let autoConsent = false;
+let hostGranted = false;
+let authorityInitialized;
+let policy = null;
+const tabHolds = new Map();
+const reconciling = new Map();
+const reconcileAgain = new Set();
+const SESSION_LIMIT = 200;
+const attachmentSlots = new Set();
+const detaching = new Map();
+const expectedDetach = new Set();
+let limitReached = false;
+let publicationTruncated = false;
+function detachTab(tabId) {
+  if (detaching.has(tabId)) return detaching.get(tabId);
+  expectedDetach.add(tabId);
+  const pending = chrome.debugger
+    .detach({ tabId })
+    .catch(() => {})
+    .finally(() => detaching.delete(tabId));
+  detaching.set(tabId, pending);
+  return pending;
+}
+function initializeAuthority() {
+  if (!authorityInitialized)
+    authorityInitialized = (async () => {
+      const [local, session] = await Promise.all([
+        chrome.storage.local.get("lumiAutoConsent"),
+        chrome.storage.session.get("lumiTabHolds"),
+      ]);
+      autoConsent = local.lumiAutoConsent === true;
+      for (const [id, state] of Object.entries(session.lumiTabHolds || {})) {
+        if (/^\d+$/.test(id) && ["paused", "taken_over"].includes(state))
+          tabHolds.set(Number(id), state);
+      }
+      hostGranted = await chrome.permissions.contains({
+        origins: HOST_ORIGINS,
+      });
+    })().catch(() => {
+      autoConsent = false;
+      hostGranted = false;
+    });
+  return authorityInitialized;
+}
+function allowedUrl(url) {
+  try {
+    return !!policy && !policy.blocked.has(normalizePolicyUrl(url));
+  } catch {
+    return false;
+  }
+}
+function canAutoControl() {
+  return autoConsent && hostGranted && nativeReady && !!policy;
+}
+async function persistHolds() {
+  try {
+    await chrome.storage.session.set({
+      lumiTabHolds: Object.fromEntries(tabHolds),
+    });
+  } catch (error) {
+    autoConsent = false;
+    for (const s of sessions.values())
+      if (s.state === "active") revoke(s, "permission_required");
+    await chrome.storage.local.set({ lumiAutoConsent: false }).catch(() => {});
+    throw error;
+  }
+}
+function holdTabId(tabId, state) {
+  tabHolds.set(tabId, state);
+  for (const s of sessions.values()) if (s.tabId === tabId) revoke(s, state);
+  return persistHolds();
+}
+function holdTab(s, state) {
+  return holdTabId(s.tabId, state);
+}
+function rejectPolicy() {
+  policy = null;
+  for (const s of sessions.values())
+    if (s.state === "active") revoke(s, "policy_required");
+  publish();
+}
+function acceptPolicy(message) {
+  if (
+    !Number.isSafeInteger(message.epoch) ||
+    message.epoch < 1 ||
+    !Array.isArray(message.blockedUrls) ||
+    message.blockedUrls.length > 100
+  ) {
+    rejectPolicy();
+    return;
+  }
+  let blocked;
+  try {
+    blocked = new Set(
+      message.blockedUrls.map((url) => {
+        if (typeof url !== "string" || url.length > 2048)
+          throw Error("invalid policy URL");
+        return normalizePolicyUrl(url);
+      }),
+    );
+  } catch {
+    rejectPolicy();
+    return;
+  }
+  if (policy && message.epoch < policy.epoch) return;
+  if (policy && message.epoch === policy.epoch) {
+    if (
+      blocked.size !== policy.blocked.size ||
+      [...blocked].some((url) => !policy.blocked.has(url))
+    )
+      rejectPolicy();
+    return;
+  }
+  policy = { epoch: message.epoch, blocked };
+  // Synchronously cancel every old-policy operation before any async tab lookup.
+  for (const s of sessions.values()) {
+    if (s.state === "active")
+      revoke(s, allowedUrl(s.url) ? "policy_changed" : "blocked");
+  }
+  publish();
+  void reconcileAll();
+}
+async function reconcileAll() {
+  await initializeAuthority();
+  if (!canAutoControl()) return;
+  const tabs = await chrome.tabs.query({ url: HOST_ORIGINS });
+  limitReached =
+    tabs.filter((tab) => allowedUrl(tab.url) && !tabHolds.has(tab.id)).length >
+    SESSION_LIMIT;
+  await Promise.all(tabs.map((tab) => reconcileTab(tab.id)));
+}
+function reconcileTab(tabId) {
+  if (!Number.isInteger(tabId)) return Promise.resolve();
+  if (reconciling.has(tabId)) {
+    reconcileAgain.add(tabId);
+    return reconciling.get(tabId);
+  }
+  const operation = (async () => {
+    do {
+      reconcileAgain.delete(tabId);
+      await initializeAuthority();
+      if (!canAutoControl() || tabHolds.has(tabId)) return;
+      const expectedPolicy = policy.epoch;
+      let tab;
+      try {
+        tab = await chrome.tabs.get(tabId);
+      } catch {
+        return;
+      }
+      if (
+        !canAutoControl() ||
+        policy.epoch !== expectedPolicy ||
+        tabHolds.has(tabId)
+      )
+        return;
+      if (!allowedUrl(tab.url)) {
+        for (const s of sessions.values())
+          if (s.tabId === tabId && s.state === "active") revoke(s, "blocked");
+        return;
+      }
+      const existing = [...sessions.values()].find(
+        (s) =>
+          s.tabId === tabId &&
+          s.state === "active" &&
+          s.policyEpoch === expectedPolicy &&
+          s.url === tab.url,
+      );
+      if (!existing) {
+        if (
+          !attachmentSlots.has(tabId) &&
+          attachmentSlots.size >= SESSION_LIMIT
+        ) {
+          limitReached = true;
+          return;
+        }
+        attachmentSlots.add(tabId);
+        try {
+          await attachAllowedTab(tabId);
+        } catch {
+          /* Restricted Chrome pages and lost races remain fail-closed. */
+        } finally {
+          if (
+            ![...sessions.values()].some(
+              (s) => s.tabId === tabId && s.state === "active",
+            )
+          )
+            attachmentSlots.delete(tabId);
+        }
+      }
+    } while (reconcileAgain.has(tabId));
+  })().finally(() => {
+    const again = reconcileAgain.has(tabId);
+    reconciling.delete(tabId);
+    reconcileAgain.delete(tabId);
+    if (again) void reconcileTab(tabId);
+  });
+  reconciling.set(tabId, operation);
+  return operation;
+}
+
 const RETRY_PREFIX = "lumi-browser-connect-";
 const RETRY_DELAYS_MINUTES = [1, 2, 5, 10, 30];
 const EXHAUSTED_ALARM = `${RETRY_PREFIX}paused`;
@@ -81,6 +283,7 @@ function scheduleReconnect() {
   });
 }
 function transportFailed(reason) {
+  policy = null;
   transportEpoch++;
   nativePort = null;
   nativeReady = false;
@@ -92,7 +295,7 @@ function transportFailed(reason) {
   pruneRecentIds();
   for (const session of sessions.values()) {
     if (["active", "paused"].includes(session.state))
-      revoke(session, "disconnected");
+      revoke(session, tabHolds.get(session.tabId) || "disconnected");
   }
   scheduleReconnect();
   publish();
@@ -105,7 +308,7 @@ function ensureConnection({ resetBudget = false } = {}) {
       : connecting;
   }
   connecting = (async () => {
-    await initializeTransport();
+    await Promise.all([initializeTransport(), initializeAuthority()]);
     if (nativePort) return;
     if (resetBudget) {
       await clearRetryAlarms();
@@ -131,7 +334,16 @@ function ensureConnection({ resetBudget = false } = {}) {
 }
 function transportStatus() {
   return {
-    sessions: list(),
+    sessions: localList(),
+    autoConsent,
+    hostGranted,
+    policyReady: !!policy,
+    policyEpoch: policy?.epoch ?? null,
+    blockedUrls: policy ? [...policy.blocked] : [],
+    tabHolds: Object.fromEntries(tabHolds),
+    sessionLimit: SESSION_LIMIT,
+    limitReached,
+    publicationTruncated,
     connected: nativeReady,
     connecting: !!nativePort && !nativeReady,
     transportError,
@@ -162,8 +374,42 @@ const describe = (s) => ({
   origin: s.origin,
   state: s.state,
 });
-const list = () => [...sessions.values()].map(describe);
+const list = () =>
+  !canAutoControl()
+    ? []
+    : [...sessions.values()]
+        .filter(
+          (s) =>
+            s.state === "active" &&
+            s.policyEpoch === policy.epoch &&
+            !tabHolds.has(s.tabId) &&
+            allowedUrl(s.url),
+        )
+        .map(describe);
+const localList = () =>
+  [...sessions.values()].map((s) => {
+    const item = describe(s);
+    if (policy && !allowedUrl(s.url)) {
+      item.title = "";
+      try {
+        item.url = normalizePolicyUrl(s.url);
+      } catch {
+        item.url = "";
+      }
+      item.state = tabHolds.get(s.tabId) || "blocked";
+    }
+    return item;
+  });
 function postNative(port, message) {
+  if (message.type === "sessions") {
+    publicationTruncated = message.sessions.length > SESSION_LIMIT;
+    if (publicationTruncated)
+      message = {
+        ...message,
+        sessions: message.sessions.slice(0, SESSION_LIMIT),
+        truncated: true,
+      };
+  }
   const encodedSize = (value) =>
     new TextEncoder().encode(JSON.stringify(value)).length;
   if (encodedSize(message) > 900 * 1024) {
@@ -186,7 +432,8 @@ function postNative(port, message) {
         sessions.push(session);
         bytes += size;
       }
-      message = { type: "sessions", sessions, truncated: true };
+      message = { ...message, sessions, truncated: true };
+      publicationTruncated = true;
     } else return;
   }
   port.postMessage(message);
@@ -194,7 +441,11 @@ function postNative(port, message) {
 function publish() {
   try {
     if (nativePort)
-      postNative(nativePort, { type: "sessions", sessions: list() });
+      postNative(nativePort, {
+        type: "sessions",
+        policyEpoch: policy?.epoch ?? null,
+        sessions: list(),
+      });
   } catch {}
   chrome.action.setBadgeText({
     text: [...sessions.values()].some((s) => s.state === "active") ? "ON" : "",
@@ -234,6 +485,10 @@ function openNativePort() {
       publish();
       return;
     }
+    if (nativeReady && message?.type === "policy") {
+      acceptPolicy(message);
+      return;
+    }
     if (
       !nativeReady ||
       typeof message?.id !== "string" ||
@@ -246,13 +501,22 @@ function openNativePort() {
       if (pending?.port === port && pending.session?.state === "active") {
         // The host authenticates client ownership. Only the request's bound
         // session is paused; no other tab/session is affected by cancellation.
-        invalidate(pending.session, "paused");
-        page(pending.session, "remove_overlay").catch(() => {});
-        publish();
+        void holdTab(pending.session, "paused").catch(() => {});
       }
       return;
     }
     if (message.type !== "request") return;
+    if (!canAutoControl() || message.policyEpoch !== policy.epoch) {
+      postNative(port, {
+        type: "response",
+        id: message.id,
+        error: {
+          code: "policy_required",
+          message: "Current browser permission and policy epoch are required.",
+        },
+      });
+      return;
+    }
     pruneRecentIds();
     if (nativeRequests.has(message.id) || recentNativeIds.has(message.id)) {
       postNative(port, {
@@ -315,7 +579,7 @@ function openNativePort() {
     if (nativePort !== port) return;
     const reason =
       chrome.runtime.lastError?.message ||
-      "Lumi disconnected. Reconnect communication, then explicitly authorize tabs again.";
+      "Lumi disconnected. Browser control is blocked until a new authenticated policy arrives.";
     transportFailed(reason);
   });
   publish();
@@ -325,7 +589,15 @@ async function page(s, operation, args = {}) {
     target: { tabId: s.tabId, frameIds: [0] },
     world: "ISOLATED",
     func: pageOperation,
-    args: [operation, { ...args, expectedOrigin: s.origin }],
+    args: [
+      operation,
+      {
+        ...args,
+        expectedOrigin: s.origin,
+        expectedUrl: s.url,
+        sessionToken: s.id,
+      },
+    ],
   });
   const value = results[0]?.result;
   if (!value)
@@ -338,47 +610,126 @@ async function page(s, operation, args = {}) {
 }
 async function guard(s, epoch) {
   assertLive(s, epoch);
-  const tab = await chrome.tabs.get(s.tabId);
-  if (originOf(tab.url) !== s.origin) {
-    revoke(s, "origin_changed");
+  if (
+    !canAutoControl() ||
+    tabHolds.has(s.tabId) ||
+    s.policyEpoch !== policy.epoch
+  )
     throw new LumiError(
-      "origin_changed",
-      "New origin needs explicit authorization.",
+      "policy_required",
+      "Current browser policy is not available.",
+    );
+  const policyEpoch = policy.epoch;
+  const granted = await chrome.permissions.contains({ origins: HOST_ORIGINS });
+  assertLive(s, epoch);
+  if (
+    !granted ||
+    !canAutoControl() ||
+    policy.epoch !== policyEpoch ||
+    tabHolds.has(s.tabId)
+  )
+    throw new LumiError(
+      "permission_required",
+      "Browser permission or policy changed.",
+    );
+  const tab = await chrome.tabs.get(s.tabId);
+  assertLive(s, epoch);
+  if (
+    !canAutoControl() ||
+    policy.epoch !== policyEpoch ||
+    !allowedUrl(tab.url) ||
+    tabHolds.has(s.tabId)
+  )
+    throw new LumiError("policy_changed", "This URL is no longer allowed.");
+  if (originOf(tab.url) !== s.origin || tab.url !== s.url) {
+    revoke(s, "navigation_changed");
+    void reconcileTab(s.tabId);
+    throw new LumiError(
+      "navigation_changed",
+      "Navigation invalidated this session. Take a fresh snapshot in the new session.",
     );
   }
-  assertLive(s, epoch);
 }
 async function cdp(s, epoch, method, params) {
   await guard(s, epoch);
+  // No await between this final epoch check and the actual CDP dispatch.
+  assertLive(s, epoch);
+  if (
+    !canAutoControl() ||
+    tabHolds.has(s.tabId) ||
+    s.policyEpoch !== policy.epoch
+  )
+    throw new LumiError("policy_changed", "Policy changed before dispatch.");
   return chrome.debugger.sendCommand({ tabId: s.tabId }, method, params);
 }
 function revoke(s, state = "revoked") {
   invalidate(s, state);
   page(s, "remove_overlay").catch(() => {});
-  chrome.debugger.detach({ tabId: s.tabId }).catch(() => {});
+  attachmentSlots.delete(s.tabId);
+  void detachTab(s.tabId);
   publish();
 }
-async function authorize(tabId) {
+async function attachAllowedTab(tabId) {
   const consentEpoch = transportEpoch;
+  if (!canAutoControl() || tabHolds.has(tabId))
+    throw new LumiError(
+      "permission_required",
+      "Automatic browser control is not available.",
+    );
+  const policyEpoch = policy.epoch;
   const tab = await chrome.tabs.get(tabId);
   const origin = originOf(tab.url);
+  if (!allowedUrl(tab.url))
+    throw new LumiError("blocked_url", "This URL is blocked.");
   for (const old of sessions.values())
     if (old.tabId === tabId) {
       invalidate(old, "revoked");
-      await chrome.debugger.detach({ tabId }).catch(() => {});
+      await detachTab(tabId);
       sessions.delete(old.id);
     }
+  const granted = await chrome.permissions.contains({ origins: HOST_ORIGINS });
+  if (
+    !granted ||
+    !canAutoControl() ||
+    policy.epoch !== policyEpoch ||
+    tabHolds.has(tabId) ||
+    consentEpoch !== transportEpoch
+  )
+    throw new LumiError(
+      "cancelled",
+      "Browser policy changed before attachment.",
+    );
+  if (detaching.has(tabId)) await detaching.get(tabId);
+  if (
+    !canAutoControl() ||
+    policy.epoch !== policyEpoch ||
+    tabHolds.has(tabId) ||
+    consentEpoch !== transportEpoch
+  )
+    throw new LumiError(
+      "cancelled",
+      "Policy changed while detaching the old session.",
+    );
   await chrome.debugger.attach({ tabId }, "1.3");
   const current = await chrome.tabs.get(tabId);
-  if (originOf(current.url) !== origin) {
-    await chrome.debugger.detach({ tabId });
+  if (
+    !allowedUrl(current.url) ||
+    originOf(current.url) !== origin ||
+    current.url !== tab.url
+  ) {
+    await detachTab(tabId);
     throw new LumiError(
       "origin_changed",
       "Page navigated during authorization; authorize again.",
     );
   }
-  if (consentEpoch !== transportEpoch) {
-    await chrome.debugger.detach({ tabId }).catch(() => {});
+  if (
+    consentEpoch !== transportEpoch ||
+    !canAutoControl() ||
+    policy.epoch !== policyEpoch ||
+    tabHolds.has(tabId)
+  ) {
+    await detachTab(tabId);
     throw new LumiError(
       "cancelled",
       "Connection changed during authorization; authorize again.",
@@ -392,11 +743,12 @@ async function authorize(tabId) {
     origin,
     state: "active",
     epoch: 0,
+    policyEpoch,
     queue: Promise.resolve(),
   };
   sessions.set(s.id, s);
   try {
-    await page(s, "snapshot");
+    await guard(s, s.epoch);
     if (consentEpoch !== transportEpoch || s.state !== "active")
       throw new LumiError(
         "cancelled",
@@ -410,6 +762,11 @@ async function authorize(tabId) {
   }
 }
 async function handleRequest(tool, args) {
+  if (!canAutoControl())
+    throw new LumiError(
+      "policy_required",
+      "Allow browser permissions and wait for Lumi policy first.",
+    );
   if (tool === "list_sessions") return { sessions: list() };
   if (
     !["snapshot", "read_text", "click", "fill", "scroll", "wait_for"].includes(
@@ -425,7 +782,11 @@ async function handleRequest(tool, args) {
     );
   return enqueue(s, async (epoch) => {
     await guard(s, epoch);
-    if (tool === "snapshot" || tool === "read_text") return page(s, tool, args);
+    if (tool === "snapshot" || tool === "read_text") {
+      const result = await page(s, tool, args);
+      await guard(s, epoch);
+      return result;
+    }
     if (tool === "wait_for") {
       if (!args.ref && (typeof args.text !== "string" || !args.text.length))
         throw new LumiError(
@@ -446,8 +807,9 @@ async function handleRequest(tool, args) {
       const deadline = Date.now() + timeout;
       do {
         await guard(s, epoch);
-        if ((await page(s, "wait_check", args)).matched)
-          return { matched: true };
+        const observation = await page(s, "wait_check", args);
+        await guard(s, epoch);
+        if (observation.matched) return { matched: true };
         if (Date.now() >= deadline) break;
         await new Promise((resolve) => setTimeout(resolve, 100));
       } while (true);
@@ -570,8 +932,7 @@ async function handleRequest(tool, args) {
     } catch (e) {
       if (emitted) {
         if (s.state === "active") {
-          invalidate(s, "paused");
-          publish();
+          await holdTab(s, "paused").catch(() => {});
         }
         throw new LumiError(
           "outcome_unknown",
@@ -604,35 +965,51 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     }
     if (message.type === "command")
       return handleRequest(message.tool, message.args || {});
-    if (message.type === "authorize") return authorize(message.tabId);
+    if (message.type === "enable_auto") {
+      await initializeAuthority();
+      if (!(await chrome.permissions.contains({ origins: HOST_ORIGINS })))
+        throw new LumiError(
+          "permission_required",
+          "Grant Chrome website permissions first.",
+        );
+      await chrome.storage.local.set({ lumiAutoConsent: true });
+      autoConsent = true;
+      hostGranted = true;
+      await ensureConnection({ resetBudget: true });
+      await reconcileAll();
+      return transportStatus();
+    }
+    if (message.type === "resume_tab") {
+      if (!Number.isInteger(message.tabId))
+        throw new LumiError("invalid_argument", "A tab ID is required.");
+      tabHolds.delete(message.tabId);
+      await persistHolds();
+      await reconcileTab(message.tabId);
+      return transportStatus();
+    }
+    if (["pause", "takeover", "disconnect"].includes(message.type)) {
+      const tabId = message.tabId ?? sessions.get(message.sessionId)?.tabId;
+      if (!Number.isInteger(tabId))
+        throw new LumiError("unknown_session", "A current tab ID is required.");
+      await holdTabId(
+        tabId,
+        message.type === "pause" ? "paused" : "taken_over",
+      );
+      return transportStatus();
+    }
     const s = sessions.get(message.sessionId);
     if (!s) throw new LumiError("unknown_session", "Session no longer exists.");
-    if (message.type === "pause") {
-      invalidate(s, "paused");
-      await page(s, "remove_overlay").catch(() => {});
-    } else if (message.type === "resume") {
-      if (s.state !== "paused")
-        throw new LumiError(
-          "reauthorize_required",
-          "Authorize this tab again to restore control.",
-        );
-      const resumeEpoch = s.epoch;
-      const tab = await chrome.tabs.get(s.tabId);
-      if (s.state !== "paused" || s.epoch !== resumeEpoch)
-        throw new LumiError(
-          "cancelled",
-          "Session changed while resuming; authorize again.",
-        );
-      if (originOf(tab.url) !== s.origin) {
-        revoke(s, "origin_changed");
-        throw new LumiError("origin_changed", "Authorize the new origin.");
-      }
-      invalidate(s, "active");
-    } else if (message.type === "takeover" || message.type === "disconnect")
-      revoke(s, message.type === "takeover" ? "taken_over" : "disconnected");
-    else throw new LumiError("invalid_operation", "Unsupported popup action.");
+    if (message.type === "pause") await holdTab(s, "paused");
+    else if (message.type === "takeover" || message.type === "disconnect")
+      await holdTab(s, "taken_over");
+    else if (message.type === "resume") {
+      tabHolds.delete(s.tabId);
+      await persistHolds();
+      await reconcileTab(s.tabId);
+    } else
+      throw new LumiError("invalid_operation", "Unsupported popup action.");
     publish();
-    return { sessions: list() };
+    return transportStatus();
   })().then(
     (result) => respond({ result }),
     (error) => respond({ error: errorJSON(error) }),
@@ -640,53 +1017,102 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   return true;
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
+  attachmentSlots.delete(tabId);
+  expectedDetach.delete(tabId);
+  tabHolds.delete(tabId);
+  void persistHolds().catch(() => {});
   for (const s of sessions.values())
     if (s.tabId === tabId) {
       invalidate(s, "closed");
-      publish();
+      sessions.delete(s.id);
     }
+  publish();
+  void reconcileAll();
 });
-chrome.tabs.onUpdated.addListener((tabId, change) => {
+function navigationChanged(tabId, url) {
   for (const s of sessions.values())
     if (s.tabId === tabId) {
-      if (change.url) {
-        s.url = change.url;
+      if (s.state === "active")
+        revoke(s, allowedUrl(url) ? "navigation_changed" : "blocked");
+      if (!allowedUrl(url)) {
+        s.title = "";
         try {
-          if (originOf(change.url) !== s.origin) revoke(s, "origin_changed");
+          s.url = normalizePolicyUrl(url);
         } catch {
-          revoke(s, "restricted_page");
+          s.url = "";
         }
       }
-      if (change.title) s.title = change.title;
     }
-  if (change.url || change.title) publish();
+  void reconcileTab(tabId);
+}
+chrome.tabs.onUpdated.addListener((tabId, change) => {
+  if (change.url) navigationChanged(tabId, change.url);
+  else if (change.status === "complete") void reconcileTab(tabId);
+  if (change.title)
+    for (const s of sessions.values())
+      if (s.tabId === tabId && s.state === "active") s.title = change.title;
+  publish();
+});
+chrome.tabs.onCreated.addListener((tab) => {
+  void reconcileTab(tab.id);
 });
 chrome.webNavigation.onCommitted.addListener((details) => {
-  if (details.frameId !== 0) return;
-  for (const s of sessions.values())
-    if (s.tabId === details.tabId) {
-      // Every full navigation cancels actions already queued in the old document.
-      s.epoch++;
-      try {
-        if (originOf(details.url) !== s.origin) revoke(s, "origin_changed");
-      } catch {
-        revoke(s, "restricted_page");
-      }
-      s.url = details.url;
+  if (details.frameId === 0) navigationChanged(details.tabId, details.url);
+});
+chrome.debugger.onDetach.addListener((source, reason) => {
+  if (
+    ["canceled_by_user", "replaced_with_devtools"].includes(reason) &&
+    Number.isInteger(source.tabId)
+  ) {
+    void holdTabId(source.tabId, "taken_over").catch(() => {});
+    return;
+  }
+  void (async () => {
+    if (detaching.has(source.tabId)) {
+      expectedDetach.delete(source.tabId);
+      return;
     }
+    const current = [...sessions.values()].find(
+      (s) => s.tabId === source.tabId && s.state === "active",
+    );
+    if (!current) {
+      expectedDetach.delete(source.tabId);
+      return;
+    }
+    if (expectedDetach.has(source.tabId)) {
+      expectedDetach.delete(source.tabId);
+      try {
+        const targets = await chrome.debugger.getTargets();
+        if (
+          targets.some(
+            (target) => target.tabId === source.tabId && target.attached,
+          )
+        )
+          return;
+      } catch {
+        /* Unknown target state remains conservative: honor takeover. */
+      }
+    }
+    if (sessions.get(current.id) === current && current.state === "active")
+      await holdTabId(source.tabId, "taken_over");
+    publish();
+  })().catch(() => {});
+});
+chrome.permissions.onRemoved.addListener(() => {
+  hostGranted = false;
+  for (const s of sessions.values())
+    if (s.state === "active") revoke(s, "permission_required");
   publish();
 });
-chrome.debugger.onDetach.addListener((source) => {
-  for (const s of sessions.values())
-    if (s.tabId === source.tabId && ["active", "paused"].includes(s.state)) {
-      invalidate(s, "detached");
-      page(s, "remove_overlay").catch(() => {});
-    }
-  publish();
+chrome.permissions.onAdded.addListener(() => {
+  void (async () => {
+    hostGranted = await chrome.permissions.contains({ origins: HOST_ORIGINS });
+    if (hostGranted) await reconcileAll();
+  })();
 });
 
-// Reconnecting restores only the communication channel. No tab is attached,
-// authorized, resumed, or replayed by any of these lifecycle paths.
+// The transport alone grants nothing. A fresh policy plus persisted website
+// permission may create new sessions; held tabs and old actions never resume.
 chrome.runtime.onStartup.addListener(() => {
   void ensureConnection({ resetBudget: true });
 });
