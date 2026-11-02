@@ -959,11 +959,33 @@ async function handleRequest(tool, args) {
       "policy_required",
       "Allow browser permissions and wait for Lumi policy first.",
     );
+  if (tool === "open_tab" || tool === "navigate") {
+    if (
+      typeof args.url !== "string" ||
+      args.url.length > 2048 ||
+      !allowedUrl(args.url)
+    )
+      throw new LumiError(
+        "blocked_url",
+        "Invalid or blocked navigation target.",
+      );
+    if (tool === "open_tab") {
+      await chrome.tabs.create({ url: new URL(args.url).href, active: false });
+      return { dispatched: true };
+    }
+  }
   if (tool === "list_sessions") return { sessions: list() };
   if (
-    !["snapshot", "read_text", "click", "fill", "scroll", "wait_for"].includes(
-      tool,
-    )
+    ![
+      "navigate",
+      "reload",
+      "snapshot",
+      "read_text",
+      "click",
+      "fill",
+      "scroll",
+      "wait_for",
+    ].includes(tool)
   )
     throw new LumiError("unknown_tool", "Unsupported browser tool.");
   const s = sessions.get(args.sessionId);
@@ -974,6 +996,16 @@ async function handleRequest(tool, args) {
     );
   return enqueue(s, async (epoch) => {
     await guard(s, epoch);
+    if (tool === "navigate" || tool === "reload") {
+      assertLive(s, epoch);
+      if (tool === "reload") await chrome.tabs.reload(s.tabId);
+      else {
+        if (!allowedUrl(args.url))
+          throw new LumiError("blocked_url", "Destination is blocked.");
+        await chrome.tabs.update(s.tabId, { url: new URL(args.url).href });
+      }
+      return { dispatched: true };
+    }
     if (tool === "snapshot" || tool === "read_text") {
       const result = await page(s, tool, args);
       await guard(s, epoch);

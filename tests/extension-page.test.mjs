@@ -204,3 +204,44 @@ test("fresh session tokens invalidate old refs even when the document remains id
     "navigation_changed",
   );
 });
+
+test("a delegated menu label gets its own guarded click reference", (t) => {
+  const label = {
+    ...el,
+    tagName: "SPAN",
+    contains(node) {
+      return node === this;
+    },
+    labels: [],
+    getAttribute: () => null,
+    getAttributeNames: () => [],
+    innerText: "文章",
+    textContent: "文章",
+    childNodes: [{ nodeType: 3, textContent: "文章" }],
+    closest: (selector) => (selector.includes("dropdown") ? label : null),
+  };
+  t.mock.method(document, "querySelectorAll", (selector) =>
+    selector === "*" ? [label] : [],
+  );
+  t.mock.method(document, "elementFromPoint", () => label);
+  const { controls } = pageOperation("snapshot");
+  assert.deepEqual(
+    controls.map(({ name }) => name),
+    ["文章"],
+  );
+  const ref = controls[0].ref;
+  assert.deepEqual(pageOperation("prepare", { ref, action: "click" }), {
+    x: 60,
+    y: 40,
+  });
+  document.elementFromPoint = () => el;
+  assert.equal(
+    pageOperation("prepare", { ref, action: "click" }).error.code,
+    "obstructed",
+  );
+  label.innerText = "视频";
+  assert.equal(
+    pageOperation("prepare", { ref, action: "click" }).error.code,
+    "stale_ref",
+  );
+});

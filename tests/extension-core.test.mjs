@@ -121,3 +121,26 @@ test("policy URL normalization ignores query/hash, preserves trailing slash, and
   ])
     assert.throws(() => normalizePolicyUrl(url));
 });
+
+test("navigation accepts only bounded HTTP(S) destinations and scoped tab actions", () => {
+  const url = "https://example.org/path?q=1#fragment";
+  assert.deepEqual(validateRemoteRequest({ tool: "open_tab", args: { url } }), {
+    url,
+  });
+  for (const target of [
+    "file:///tmp/a",
+    "javascript:alert(1)",
+    "https://u:p@example.org",
+    "x".repeat(2049),
+  ]) {
+    assert.throws(() =>
+      validateRemoteRequest({ tool: "open_tab", args: { url: target } }),
+    );
+  }
+  assert.throws(() =>
+    validateRemoteRequest({ tool: "navigate", args: { url } }),
+  );
+  assert.throws(() =>
+    validateRemoteRequest({ tool: "reload", args: { sessionId: "s", url } }),
+  );
+});
