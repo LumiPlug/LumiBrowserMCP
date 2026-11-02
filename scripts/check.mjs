@@ -13,4 +13,4 @@ async function check(dir) {
     }
   }
 }
-for (const dir of ["bridge", "extension", "scripts", "tests"]) await check(dir);
+for (const dir of ["extension", "scripts", "tests"]) await check(dir);

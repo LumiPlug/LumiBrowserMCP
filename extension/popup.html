@@ -30,7 +30,7 @@
       <details>
         <summary>诊断工具面板</summary>
         <p>
-          此面板用于手动诊断；日常操作由已连接的 Agent
+          此面板用于手动诊断；日常操作由通过 Lumi 连接的 Agent
           发起。先授权，再获取快照，从结果复制 ref。每次快照会使旧 ref 失效。
         </p>
         <label
@@ -58,9 +58,8 @@
       <details>
         <summary>首次使用与安全</summary>
         <p>
-          Chrome 扩展执行所有页面操作。后台 MCP 适配器让 Agent
-          自动连接，无独立操作界面；所有输入通过 Chrome
-          调试协议完成，不接管系统鼠标。
+          Chrome 扩展执行页面操作；请先在 Lumi 的 Browser User 设置中启用连接并填写此扩展 ID。无需单独安装适配器。所有输入通过 Chrome 调试协议完成，不接管系统鼠标。
+          所有接入 Lumi 的 Agent 共享同一控制域，串行操作，不是逐 Agent 独立授权。
         </p>
         <p>
           Chrome

@@ -37,8 +37,8 @@ async function refresh() {
     (s) => s.tabId === currentTab?.id && s.state === "active",
   );
   $("connection").textContent = status.connected
-    ? "● MCP 适配器已连接"
-    : `○ MCP 适配器未连接${status.transportError ? " · " + status.transportError : "（授权后连接）"}`;
+    ? "● Lumi 已连接"
+    : `○ Lumi 未连接${status.transportError ? " · " + status.transportError : "（请先在 Lumi 设置中启用 Browser User）"}`;
   $("sessions").replaceChildren();
   for (const s of status.sessions.filter((s) => s.tabId === currentTab?.id)) {
     const box = document.createElement("section");

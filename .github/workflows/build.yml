@@ -1,4 +1,4 @@
-name: Test and package
+name: Test and package Chrome extension
 on:
   push:
     branches: [main]
@@ -8,36 +8,10 @@ permissions:
   contents: read
 jobs:
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "22"
-          cache: npm
-      - run: npm ci
-      - run: npm run check
-      - run: npm test
-      - run: npm run build
-      - uses: actions/upload-artifact@v7
-        with:
-          name: lumi-browser-extension
-          path: dist/lumi-browser-extension.zip*
-          if-no-files-found: error
-  adapter:
-    needs: test
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-15-intel
-            arch: x64
-          - os: macos-15
-            arch: arm64
-          - os: windows-2022
-            arch: x64
+        os: [ubuntu-latest, windows-2022, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -46,15 +20,23 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
-          architecture: ${{ matrix.arch }}
-          cache: npm
       - run: npm ci
       - run: npm run check
       - run: npm test
-      - run: npm run build:adapter
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm run build
       - uses: actions/upload-artifact@v7
         with:
-          name: lumi-browser-adapter-${{ runner.os }}-${{ matrix.arch }}
-          path: dist/lumi-browser-adapter-*.zip*
+          name: lumi-browser-extension
+          path: dist/lumi-browser-extension.zip*
           if-no-files-found: error
-          retention-days: 30

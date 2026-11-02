@@ -1,35 +1,29 @@
 # 架构与边界
 
-## 产品与通信
+## 当前产品边界
 
-用户最终确认：产品是 Chrome 扩展；允许本地 Agent 自动启动无 GUI 的 MCP 适配器。不是桌面应用，不含托盘，不要求手工启动常驻服务。
+LumiBrowserMCP 只有 Chrome MV3 扩展。Lumi 内置 Browser User 服务复用既有 Registry/MCP、stdio proxy、Core 生命周期；随 Lumi 打包的 Native Host 只连接已运行 Core，不自启后台 broker。
 
-`本地 Agent → MCP stdio 适配器 → 本机 IPC broker ← Chrome 启动的 Native Messaging host ← MV3 扩展 → CDP`
+`Agent → Lumi 现有 MCP → Core BrowserService → 同用户 IPC → 随包 Native Host → 扩展 → chrome.debugger/CDP`
 
-Chrome 的 Native Messaging host 由 Chrome 启动，与 Agent 启动的 stdio 进程不是同一进程，所以存在最小本机 IPC 转发层。MCP stdout 使用其协议，Native Messaging stdout 使用 4 字节长度前缀 JSON，日志只写 stderr，二者不得混用。broker 按需启动，最后 MCP 客户端结束后回收，不能遗留常驻服务。
+本仓库保留 popup、service worker、隔离页面辅助程序及测试。Windows/macOS 共用同一扩展 ZIP；本地宿主由 Lumi 仓库构建，不在此仓库再次发布。
 
 ## 授权与身份
 
-Native Messaging manifest 仅允许用户安装时指定的扩展 ID；本机 IPC 限制当前用户，不能监听公网。首次宿主注册是安装步骤，不在源码构建时执行。所有会话仍由用户在扩展 popup 授权，Agent 只能读取/操作授权会话，不能自行建立授权、恢复暂停或绕过接管。多客户端退出与取消必须清理其在途和排队请求。
+Lumi Browser User 默认关闭，启用及注册须桌面主窗口用户确认，MCP 无此管理能力。Native Messaging manifest 精确指定扩展 ID。每个标签页仍需用户在扩展授权；不会从磁盘恢复旧授权。
 
-## 组件
+首版 Lumi MCP 使用共享凭据与无状态 HTTP，因此所有 Agent 是单一共享控制域，全局串行，**不提供逐 Agent 身份隔离**。不把请求 ID 当可信客户端身份；同用户恶意程序不在 IPC 强隔离承诺内。
 
-- popup：授权、状态、暂停、接管、断开，诊断测试命令。
-- service worker：授权会话、串行操作队列、epoch、Native Messaging 通信；通过 chrome.debugger 执行 CDP Input。
-- 页面辅助程序：隔离上下文快照、ref、身份/语义校验、滚动和遮挡检查、pointer-events:none 虚拟光标。
-- 适配器：MCP 工具 schema、JSON RPC、进程/IPC 生命周期、请求响应路由和取消。断线及超时不重放未知副作用。
-- CI：扩展 ZIP、Windows/macOS 无 GUI 适配器包、SHA256，以及测试报告。
+## 会话与精确输入
 
-## 会话、取消与结果未知
+会话随机 ID 绑定标签页、来源、状态和 epoch。跨源导航、关闭页面、调试器/native断开、Core停用均撤销。每次副作用前检查epoch、原节点及语义、遮挡与焦点；使用 viewport CSS 像素，不乘DPR，不激活窗口。
 
-会话 ID 随授权随机生成，绑定 tab、HTTP(S) origin 和状态。动作串行、捕获 epoch，并在异步等待后和副作用前核验。暂停/接管/断开提升 epoch。跨来源或调试器断开撤销会话；service worker 重启不得从磁盘恢复授权。
+快照更新 ref 集合；节点被替换或虚拟列表同节点语义变化会失效，不按相似selector重试。虚拟 Lumi 光标 pointer-events:none，不拦用户点击。
 
-CDP 输入不是跨进程原子事务。滚动和悬停也可能触发页面事件；副作用开始后遇到取消/断线返回 outcome_unknown 并暂停，不宣称没有点击、不自动重放。用户接管前已经送达 Chrome 的事件不能撤回。
+CDP 输入不是原子事务；滚动、悬停也可能触发页面事件。派发后取消或结果不明返回 `outcome_unknown` 并暂停，不宣称没有点击，不自动重放。已发输入不可撤回。
 
-## Ref 与坐标
+## 传输契约
 
-ref 只代表最近快照中的原 DOM 对象和语义指纹。节点替换、离开文档或复用为另一订单即失效，不能通过相似 selector 静默重新匹配。操作前验证、滚动、检查禁用和遮挡，再以 viewport CSS 像素发 CDP。虚拟光标用相同坐标，不手动乘 DPR，不调用系统鼠标或窗口激活接口。
+Native Messaging 使用4字节小端长度加JSON；消息为request(id/tool/args)、response(id/result或error)、sessions、cancel。Lumi负责本机IPC/工具schema/生命周期，本扩展只接受用户授权的sessionId。原生消息有界、重复请求不重放；服务worker重启fail closed。
 
-## 已知限制
-
-普通顶层 DOM 是首版范围；跨源 iframe、封闭 Shadow DOM、canvas 不声明支持。真实 Windows/macOS Chrome、跨应用选区和多显示器需分别验收。Chrome Web Store、发布签名、商店审核不是当前交付的一部分。源码或模拟测试不能证明全部真实网站行为正确。
+只支持普通顶层DOM；跨源iframe、closed Shadow DOM和canvas不声明支持。页面内容仅作为数据，不绕过验证码、登录确认或系统权限。真实平台、商店发布/签名不是模拟测试可证明的事项。
