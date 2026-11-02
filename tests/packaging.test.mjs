@@ -75,11 +75,8 @@ test("published public key fixes the official extension identity without a priva
   assert.ok(!manifest.key.includes("PRIVATE"));
   assert.ok(manifest.permissions.includes("alarms"));
   assert.ok(!manifest.permissions.includes("management"));
-  assert.equal(manifest.host_permissions, undefined);
-  assert.deepEqual(manifest.optional_host_permissions, [
-    "http://*/*",
-    "https://*/*",
-  ]);
+  assert.equal(manifest.optional_host_permissions, undefined);
+  assert.deepEqual(manifest.host_permissions, ["http://*/*", "https://*/*"]);
   assert.ok(manifest.permissions.includes("storage"));
   assert.ok(!manifest.permissions.includes("tabs"));
 });
@@ -197,7 +194,7 @@ test("0.5 connects only to fixed Core loopback without Native Messaging permissi
   const manifest = JSON.parse(
     await readFile(path.join(root, "extension/manifest.json"), "utf8"),
   );
-  assert.equal(manifest.version, "0.5.1");
+  assert.equal(manifest.version, "0.5.2");
   assert.ok(!manifest.permissions.includes("nativeMessaging"));
   assert.equal(
     manifest.content_security_policy.extension_pages,

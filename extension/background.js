@@ -141,7 +141,10 @@ async function setPageAllowed(message) {
       !(await chrome.permissions.contains({ origins: HOST_ORIGINS }))
     )
       throw new LumiError("permission_required", "连接或网站权限已变化。");
-    await chrome.storage.local.set({ lumiAutoConsent: true });
+    await chrome.storage.local.set({
+      lumiAutoConsent: true,
+      lumiSafetyLock: false,
+    });
     // Consent alone cannot bypass a closed Core or its current policy.
     if (
       corePort !== port ||
@@ -206,10 +209,12 @@ function initializeAuthority() {
       });
       storageTrusted = true;
       const [local, session] = await Promise.all([
-        chrome.storage.local.get("lumiAutoConsent"),
+        chrome.storage.local.get("lumiSafetyLock"),
         chrome.storage.session.get("lumiTabHolds"),
       ]);
-      autoConsent = local.lumiAutoConsent === true;
+      // Core policy plus Chrome permission define the default allow scope.
+      // Legacy missing/false lumiAutoConsent must not create a hidden opt-in.
+      autoConsent = local.lumiSafetyLock !== true;
       for (const [id, state] of Object.entries(session.lumiTabHolds || {})) {
         if (/^\d+$/.test(id) && ["paused", "taken_over"].includes(state))
           tabHolds.set(Number(id), state);
@@ -242,7 +247,7 @@ async function persistHolds() {
     autoConsent = false;
     for (const s of sessions.values())
       if (s.state === "active") revoke(s, "permission_required");
-    await chrome.storage.local.set({ lumiAutoConsent: false }).catch(() => {});
+    await chrome.storage.local.set({ lumiSafetyLock: true }).catch(() => {});
     throw error;
   }
 }
@@ -1178,7 +1183,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           "permission_required",
           "Grant Chrome website permissions first.",
         );
-      await chrome.storage.local.set({ lumiAutoConsent: true });
+      await chrome.storage.local.set({
+        lumiAutoConsent: true,
+        lumiSafetyLock: false,
+      });
       autoConsent = true;
       hostGranted = true;
       await ensureConnection({ resetBudget: true });

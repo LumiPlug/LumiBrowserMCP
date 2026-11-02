@@ -1,6 +1,6 @@
 # 验证记录
 
-当前为0.5.1 Lumi集成开发预览：本仓库只包含扩展。连接服务已内嵌Lumi Core，以loopback WebSocket直连扩展；不发布或执行独立宿主。旧commit仅作历史记录。
+当前为0.5.2 Lumi集成开发预览：本仓库只包含扩展。连接服务已内嵌Lumi Core，以loopback WebSocket直连扩展；不发布或执行独立宿主。旧commit仅作历史记录。
 
 迁移前已在 Lumi PR #17 的平台CI确认真实HTTP MCP → Core → OS IPC → Native Host → 模拟Chrome帧往返，多客户端按一个共享控制域串行。macOS 460项测试通过；Windows平台特有既有测试有明确跳过，浏览器链路测试实际执行通过。
 
@@ -13,3 +13,5 @@
 新增真实 WebCrypto 客户端测试覆盖承诺/揭示、自动TOFU登记与服务端证明后落盘、明文ready拒绝、加密序号重放拒绝、存储隔离失败关闭。测试使用模拟 WebSocket，不等于 Chrome 实机或真实跨平台发行验收。
 
 0.5.1 删除配对码与人工确认 API，独立 enroll_* 协议自动首次固定凭据；首次身份未验证，不把密钥连续性测试称作本机身份验证。
+
+0.5.2 根因修复：旧 lumiAutoConsent 隐藏门槛及 popup 混淆网站权限/页面策略。回归覆盖新装、旧 false、导航、新标签、权限撤销恢复、禁链与hold；改为 Chrome required HTTP/HTTPS 权限。按用户要求仅运行检查与测试，未重新打包交付物、未实机安装。

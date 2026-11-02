@@ -10,7 +10,7 @@ LumiBrowserMCP 只有 Chrome MV3 扩展。Lumi 内置 Browser User 服务复用�
 
 ## 授权与身份
 
-Lumi Browser User 默认关闭，首次登记窗口只能由桌面主窗口用户点击连接开启，MCP 无此管理能力。WebSocket 服务严格核验扩展 Origin、Host 与路径；Origin 本身不能证明本机身份。用户首次确认普通 HTTP(S) 全部允许，并由扩展请求 Chrome 必要主机权限。旧逐页版本偏好不静默升级；Core 下发版本化禁止链接策略。不会恢复旧会话/ref/队列；重连只为允许且未暂停/接管的页创建新会话。
+Lumi Browser User 默认关闭，首次登记窗口只能由桌面主窗口用户点击连接开启，MCP 无此管理能力。WebSocket 服务严格核验扩展 Origin、Host 与路径；Origin 本身不能证明本机身份。0.5.2 在 manifest 声明 required HTTP/HTTPS host_permissions，由 Chrome 的安装/升级流程处理必要权限确认；获得实际权限后默认允许，不再要求产品内逐页 opt-in。旧 lumiAutoConsent 不再作隐藏门槛，独立 lumiSafetyLock 保留持久安全故障关闭。Core 下发版本化禁止链接策略。不会恢复旧会话/ref/队列；重连只为允许且未暂停/接管的页创建新会话。
 
 首版 Lumi MCP 使用共享凭据与无状态 HTTP，因此所有 Agent 是单一共享控制域，全局串行，**不提供逐 Agent 身份隔离**。不把请求 ID 当可信客户端身份；TOFU 首次连接不能抵御本机恶意冒充或抢占登记窗口；固定凭据后校验密钥连续性，不自动信任新密钥。
 
@@ -38,6 +38,6 @@ CDP 输入不是原子事务；滚动、悬停也可能触发页面事件。派�
 
 0.5.1 首次连接使用 `enroll_commit / enroll_hello / enroll_offer / enroll_accept / enroll_complete` 自动登记，不复用旧人工确认协议，也不显示 SAS。Core 仅在用户点击连接后开放 120 秒登记窗口、单候选绑定当前生命周期 generation。双方验证 ECDH 承诺/揭示并导出密钥，扩展在服务器 HMAC 证明通过后才持久保存 pin。这是 TOFU，**无法验证首次本机对端身份**；HMAC 只证明对端持有本次协商密钥，不能抵御首次恶意冒充。旧 pin 存在时只走认证，不自动删除或降级；重置必须异常态用户明确确认。
 
-ready/policy/页面数据通过严格序列号与方向独立 AES-GCM 通道，不接受明文 ready。凭据仅保存在 Chrome TRUSTED_CONTEXTS storage.local，不通过网络传送原始秘密。正常弹窗只显示连接状态与允许/禁止此页，首次 Chrome 网站权限仍需要用户手势批准。
+ready/policy/页面数据通过严格序列号与方向独立 AES-GCM 通道，不接受明文 ready。凭据仅保存在 Chrome TRUSTED_CONTEXTS storage.local，不通过网络传送原始秘密。正常弹窗只显示连接状态与允许/禁止此页，Chrome 网站权限仍须通过浏览器正常安装/升级授权流程，缺失时明确显示权限状态并禁止动作。
 
 传输入口固定 127.0.0.1:43127/ws；不接受可配置外部地址。未认证消息上限4KiB、入站排队最多16帧/2MiB，发送队列有界且可合并未发送的会话快照。普通输出预算450KiB，snapshot预算400KiB，避免加密后超帧。关闭连接销毁通道、取消操作并失效会话；定时探测不能启用已关闭的Core。旧凭据认证失败不会自动降级或抹除凭据。

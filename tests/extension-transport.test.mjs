@@ -19,6 +19,14 @@ const flush = async () => {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 };
+async function until(check) {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await flush();
+  }
+  assert.fail("Encrypted transport state did not settle");
+}
 async function setup({ alarms = [], fail = false, initializationGate } = {}) {
   const scheduled = new Map(alarms.map((alarm) => [alarm.name, alarm]));
   const ports = [],
@@ -156,6 +164,9 @@ test("worker startup establishes communication, but ready handshake and tab cons
   await flush();
   assert.equal(env.attempts(), 1);
   env.ports[0].onMessage.fire({ type: "ready" });
+  await until(
+    async () => (await env.send({ type: "status" })).result.connected,
+  );
   await flush();
   state = (await env.send({ type: "status" })).result;
   assert.equal(state.connected, true);
@@ -171,6 +182,7 @@ test("disconnected Core is probed within its enrollment window without opening p
   const env = await setup({ fail: true });
   assert.equal(env.attempts(), 1);
   for (let i = 1; i <= 5; i++) {
+    await until(() => env.scheduled.has(`lumi-browser-connect-${i}`));
     for (let j = 0; j < 3; j++) await env.send({ type: "status" });
     assert.equal(env.attempts(), i);
     assert.ok(

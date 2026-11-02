@@ -32,8 +32,14 @@ async function refresh(probe = false) {
   const allowed = currentUrl && !status.blockedUrls?.includes(currentUrl);
   nextAllowed =
     !allowed || !status.autoConsent || !status.hostGranted || !!held;
-  $("toggle").textContent = nextAllowed ? "允许此页" : "禁止此页";
-  $("toggle").disabled = busy || !ready || !currentUrl;
+  $("toggle").textContent = !status.hostGranted
+    ? "需 Chrome 网站权限"
+    : nextAllowed
+      ? !status.autoConsent && allowed && !held
+        ? "恢复页面控制"
+        : "允许此页"
+      : "禁止此页";
+  $("toggle").disabled = busy || !ready || !currentUrl || !status.hostGranted;
   if (!ready && /配对凭据|重新配对/.test(status.transportError || "")) {
     $("toggle").textContent = "重新配对";
     $("toggle").disabled = busy;
@@ -48,13 +54,15 @@ async function refresh(probe = false) {
       ? "Lumi 已连接 · 此页不支持"
       : held
         ? "Lumi 已连接 · 此页已接管"
-        : !status.autoConsent || !status.hostGranted
-          ? "Lumi 已连接 · 待授权"
-          : !allowed
-            ? "Lumi 已连接 · 此页已禁止"
-            : status.limitReached || status.publicationTruncated
-              ? "Lumi 已连接 · 页面数量已达上限"
-              : "Lumi 已连接";
+        : !status.hostGranted
+          ? "Lumi 已连接 · 需 Chrome 网站权限"
+          : !status.autoConsent
+            ? "Lumi 已连接 · 页面控制已暂停"
+            : !allowed
+              ? "Lumi 已连接 · 此页已禁止"
+              : status.limitReached || status.publicationTruncated
+                ? "Lumi 已连接 · 页面数量已达上限"
+                : "Lumi 已连接";
 }
 $("toggle").addEventListener("click", async () => {
   if (
@@ -85,7 +93,13 @@ $("toggle").addEventListener("click", async () => {
     }
     return;
   }
-  if (busy || !lastStatus?.connected || !lastStatus?.policyReady || !currentUrl)
+  if (
+    busy ||
+    !lastStatus?.connected ||
+    !lastStatus?.policyReady ||
+    !lastStatus?.hostGranted ||
+    !currentUrl
+  )
     return;
   busy = true;
   $("toggle").disabled = true;
@@ -95,13 +109,6 @@ $("toggle").addEventListener("click", async () => {
     url = currentUrl,
     allowed = nextAllowed;
   try {
-    if (allowed) {
-      // Chrome's permission prompt must remain in this explicit user gesture.
-      const granted = await chrome.permissions.request({
-        origins: ["http://*/*", "https://*/*"],
-      });
-      if (!granted) throw new Error("未授予网站权限。此页未允许。");
-    }
     await request({ type: "set_page_allowed", tabId, url, allowed });
   } catch (error) {
     showError(error.message);

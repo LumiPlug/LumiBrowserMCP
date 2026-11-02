@@ -198,32 +198,32 @@ test("blocked page can be explicitly allowed and waits for the Core response", a
   assert.match(ui.element("toggle").textContent, /禁止/);
 });
 
-test("first explicit allow requests Chrome website permission before sending consent", async () => {
-  const ui = await popup({
-    status: { autoConsent: false, hostGranted: false },
-  });
-  await ui.click();
-  assert.deepEqual(ui.permissionRequests, [
-    { origins: ["http://*/*", "https://*/*"] },
-  ]);
-  assert.ok(
-    ui.calls.indexOf("permissions.request") <
-      ui.calls.indexOf("set_page_allowed"),
+test("missing required Chrome permission is not presented as a per-page allow rule", async () => {
+  const ui = await popup({ status: { autoConsent: true, hostGranted: false } });
+  assert.equal(ui.element("toggle").disabled, true);
+  assert.match(ui.element("toggle").textContent, /Chrome.*权限/);
+  await ui.element("toggle").listeners.get("click")();
+  assert.equal(ui.permissionRequests.length, 0);
+  assert.equal(
+    ui.messages.some(
+      (message) =>
+        message.type === "set_page_allowed" || message.type === "enable_auto",
+    ),
+    false,
   );
 });
 
-test("denied Chrome permission does not persist an allow rule", async () => {
+test("ordinary permitted page defaults to block action without an allow click", async () => {
   const ui = await popup({
-    status: { autoConsent: false, hostGranted: false },
-    grant: false,
+    status: { autoConsent: true, hostGranted: true, blockedUrls: [] },
   });
-  await ui.click();
+  assert.equal(ui.element("toggle").textContent, "禁止此页");
+  assert.equal(ui.element("toggle").disabled, false);
   assert.equal(
-    ui.messages.some((message) => message.type === "set_page_allowed"),
-    false,
+    ui.messages.every((message) => message.type === "status"),
+    true,
   );
-  assert.ok(ui.element("error").textContent);
-  assert.match(ui.element("toggle").textContent, /允许/);
+  assert.equal(ui.permissionRequests.length, 0);
 });
 
 test("Core failure is shown without optimistic policy success", async () => {
@@ -375,4 +375,14 @@ test("ordinary disconnected status does not expose reset or silently clear crede
   assert.equal(ui.element("toggle").disabled, true);
   assert.equal(ui.confirmations.length, 0);
   assert.ok(ui.messages.every((message) => message.type === "status"));
+});
+
+test("internal safety pause is not misreported as missing Chrome permission", async () => {
+  const ui = await popup({
+    status: { autoConsent: false, hostGranted: true, blockedUrls: [] },
+  });
+  assert.match(ui.element("connection").textContent, /页面控制已暂停/);
+  assert.doesNotMatch(ui.element("connection").textContent, /Chrome.*权限/);
+  assert.equal(ui.element("toggle").textContent, "恢复页面控制");
+  assert.equal(ui.element("toggle").disabled, false);
 });

@@ -208,7 +208,7 @@ async function setup({
   };
 }
 
-test("all-web automation waits for ready, policy, browser permission and explicit persisted consent", async () => {
+test("all-web automation waits for ready, policy and real Chrome permission, not legacy consent", async () => {
   const env = await setup();
   assert.equal(env.attached.length, 0);
   env.ports[0].onMessage.fire({ type: "policy", epoch: 1, blockedUrls: [] });
@@ -228,10 +228,12 @@ test("all-web automation waits for ready, policy, browser permission and explici
   );
   const noConsent = await setup({ consent: false });
   await noConsent.ready();
-  assert.equal(noConsent.attached.length, 0);
-  await noConsent.send({ type: "enable_auto" });
-  await flush();
-  assert.equal(noConsent.local.lumiAutoConsent, true);
+  assert.equal(noConsent.attached.length, 1);
+  assert.equal(
+    noConsent.local.lumiAutoConsent,
+    false,
+    "Legacy preference is not silently rewritten",
+  );
   assert.deepEqual(
     (await noConsent.active()).map((session) => session.tabId),
     [1],
@@ -884,4 +886,51 @@ test("removed manual pairing confirmation API cannot grant authority", async () 
   assert.ok(result.error);
   assert.equal((await env.status()).connected, false);
   assert.equal(env.local.lumiAutoConsent, false);
+});
+
+test("fresh installs and legacy false preference default allow across tabs/navigation without overriding blocks or holds", async () => {
+  for (const localData of [{}, { lumiAutoConsent: false }]) {
+    const env = await setup({
+      localData,
+      tabs: [
+        normalTab(1),
+        normalTab(2, "https://example.test/blocked"),
+        normalTab(3, "https://example.test/held"),
+      ],
+      sessionData: { lumiTabHolds: { 3: "taken_over" } },
+    });
+    await env.ready(1, ["https://example.test/blocked"]);
+    assert.deepEqual(
+      (await env.active()).map((s) => s.tabId),
+      [1],
+    );
+    const oldId = (await env.active())[0].id;
+    await env.navigate(1, "https://other.test/new");
+    assert.equal((await env.active())[0].tabId, 1);
+    assert.notEqual((await env.active())[0].id, oldId);
+    env.tabMap.set(4, normalTab(4, "http://new.test/page"));
+    env.chrome.tabs.onCreated.fire(env.tabMap.get(4));
+    await flush();
+    assert.deepEqual((await env.active()).map((s) => s.tabId).sort(), [1, 4]);
+    await env.grant(false);
+    assert.equal((await env.active()).length, 0);
+    await env.grant(true);
+    assert.deepEqual((await env.active()).map((s) => s.tabId).sort(), [1, 4]);
+    assert.equal((await env.status()).tabHolds[3], "taken_over");
+    env.ports.at(-1).onDisconnect.fire();
+    await flush();
+    await env.send({ type: "reconnect" });
+    await env.ready(2, ["https://example.test/blocked"]);
+    assert.deepEqual((await env.active()).map((s) => s.tabId).sort(), [1, 4]);
+    assert.equal((await env.status()).tabHolds[3], "taken_over");
+  }
+});
+
+test("persisted safety failure remains fail closed independently of obsolete consent preference", async () => {
+  const env = await setup({
+    localData: { lumiAutoConsent: true, lumiSafetyLock: true },
+  });
+  await env.ready();
+  assert.equal((await env.active()).length, 0);
+  assert.equal((await env.status()).autoConsent, false);
 });
