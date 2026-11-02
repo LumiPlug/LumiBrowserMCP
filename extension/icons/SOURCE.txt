@@ -1,0 +1,6 @@
+Lumi application icon artwork, reused without redesign.
+Source: https://github.com/LumiPlug/Lumi
+Commit: 0cb8e894de5392d26af49018017ba78500cacc35
+16/32/48 PNGs extracted from src-tauri/icons/icon.ico corresponding sizes.
+128 PNG copied from src-tauri/icons/128x128.png.
+License: MPL-2.0 (LICENSE.txt).

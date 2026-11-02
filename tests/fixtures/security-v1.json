@@ -1,0 +1,15 @@
+{
+  "secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+  "clientNonce": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
+  "serverNonce": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+  "serverProof": "PuJNXw88KIocr5jZOnHfuWvsdXtpiribMsFooI_gDO0",
+  "clientProof": "_TuQrhJJrnfo-jmIrvpesQIfpnNECEUqSbikHhRUXkM",
+  "plaintext": {
+    "text": "Lumi 中文 interoperability",
+    "number": 42
+  },
+  "envelope": {
+    "seq": 0,
+    "data": "yizW7KLc1uYWIK26HV3XE8YN3gF1nIPLRVy7GyblJlXXndFJ9NtQeZ5kiunXknRJ_JGpdA5ezhp_5A6YIP2akLiLMQ"
+  }
+}
