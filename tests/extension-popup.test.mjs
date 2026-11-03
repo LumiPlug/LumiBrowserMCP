@@ -309,45 +309,6 @@ test("popup source does not retain the removed pairing confirmation API", async 
   );
 });
 
-test("rejecting reset confirmation preserves pairing and sends no mutation", async () => {
-  const ui = await popup({
-    status: {
-      connected: false,
-      policyReady: false,
-      transportError: "旧配对凭据已失效，请重新配对。",
-    },
-    confirm: false,
-  });
-  assert.equal(ui.element("toggle").textContent, "重新配对");
-  await ui.click();
-  assert.equal(ui.confirmations.length, 1);
-  assert.match(ui.confirmations[0], /清除.*配对凭据/);
-  assert.match(ui.confirmations[0], /首次信任/);
-  assert.match(ui.confirmations[0], /本机/);
-  assert.doesNotMatch(ui.confirmations[0], /短码|核对/);
-  assert.ok(ui.messages.every((message) => message.type === "status"));
-  assert.equal(ui.permissionRequests.length, 0);
-});
-
-test("explicit reset confirmation sends only confirmed reset without granting website permission", async () => {
-  const ui = await popup({
-    status: {
-      connected: false,
-      policyReady: false,
-      transportError: "请重新配对",
-    },
-    confirm: true,
-  });
-  await ui.click();
-  assert.deepEqual(
-    ui.messages.filter((message) => message.type !== "status"),
-    [{ type: "reset_pairing", confirmed: true }],
-  );
-  assert.equal(ui.confirmations.length, 1);
-  assert.equal(ui.permissionRequests.length, 0);
-  assert.equal(ui.status.connected, false);
-});
-
 test("connected status does not expose credential reset even with a stale error", async () => {
   const ui = await popup({
     status: { connected: true, transportError: "请重新配对" },

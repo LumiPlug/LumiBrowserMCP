@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import {
+  createPairingHello,
+  commitPairingHello,
+  verifyPairingCommitment,
+  finishPairing,
   createNonce,
   createServerProof,
   verifyClientProof,
@@ -14,7 +18,6 @@ export async function settleWebSocketMock() {
 // Browser WebSocket facade for existing synthetic port fixtures. Subscribe to
 // their events instead of replacing fire(), preserving fixture normalization.
 export function installWebSocketMock(createPort, { secure = true } = {}) {
-  const secret = "A".repeat(43);
   const storage = globalThis.chrome?.storage?.local;
   const originalGet = storage?.get;
   const originalAccess = storage?.setAccessLevel;
@@ -29,11 +32,15 @@ export function installWebSocketMock(createPort, { secure = true } = {}) {
       )
         return {
           ...result,
-          lumiCorePairing: { secret, pairingId: "A".repeat(43) },
+          lumiCorePairing: {
+            secret: "A".repeat(43),
+            pairingId: "A".repeat(43),
+          },
         };
       return result;
     };
     storage.setAccessLevel ||= async () => {};
+    storage.remove ||= async () => {};
   }
   const previous = globalThis.WebSocket;
   const sockets = [];
@@ -143,11 +150,53 @@ export function installWebSocketMock(createPort, { secure = true } = {}) {
       this.incoming = this.incoming
         .then(async () => {
           if (this.readyState !== MockWebSocket.OPEN) return;
-          if (message.type === "auth_hello") {
+          if (message.type === "enroll_commit") {
+            this.pairing = await createPairingHello("server");
+            this.commitment = message.commitment;
+            this.emit("message", {
+              data: JSON.stringify({
+                type: "enroll_commit",
+                commitment: await commitPairingHello(
+                  this.pairing.hello,
+                  "server",
+                ),
+              }),
+            });
+          } else if (message.type === "enroll_hello") {
+            assert.ok(
+              await verifyPairingCommitment(
+                message.hello,
+                "client",
+                this.commitment,
+              ),
+            );
+            const derived = await finishPairing(
+              this.pairing.state,
+              message.hello,
+            );
+            this.secret = derived.sharedSecret;
+            this.enrollmentId = derived.pairingId;
+            this.emit("message", {
+              data: JSON.stringify({
+                type: "enroll_offer",
+                hello: this.pairing.hello,
+                enrollmentId: derived.pairingId,
+                expiresAt: Date.now() + 5000,
+              }),
+            });
+          } else if (message.type === "enroll_accept") {
+            assert.equal(message.enrollmentId, this.enrollmentId);
+            this.emit("message", {
+              data: JSON.stringify({
+                type: "enroll_complete",
+                enrollmentId: this.enrollmentId,
+              }),
+            });
+          } else if (message.type === "auth_hello") {
             this.clientNonce = message.clientNonce;
             this.serverNonce = createNonce();
             const proof = await createServerProof(
-              secret,
+              this.secret,
               this.clientNonce,
               this.serverNonce,
             );
@@ -161,7 +210,7 @@ export function installWebSocketMock(createPort, { secure = true } = {}) {
           } else if (message.type === "auth_proof") {
             assert.equal(
               await verifyClientProof(
-                secret,
+                this.secret,
                 this.clientNonce,
                 this.serverNonce,
                 message.proof,
@@ -169,7 +218,7 @@ export function installWebSocketMock(createPort, { secure = true } = {}) {
               true,
             );
             this.channel = await createSecureChannel(
-              secret,
+              this.secret,
               this.clientNonce,
               this.serverNonce,
               "server",
