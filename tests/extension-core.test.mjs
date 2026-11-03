@@ -144,3 +144,26 @@ test("navigation accepts only bounded HTTP(S) destinations and scoped tab action
     validateRemoteRequest({ tool: "reload", args: { sessionId: "s", url } }),
   );
 });
+
+test("coordinate clicks require a capture and bounded numeric arguments", () => {
+  assert.deepEqual(
+    validateRemoteRequest({
+      tool: "click_at",
+      args: { sessionId: "s", captureId: "c", x: 10, y: 20 },
+    }),
+    { sessionId: "s", captureId: "c", x: 10, y: 20 },
+  );
+  for (const args of [
+    { x: -1, y: 1 },
+    { x: NaN, y: 1 },
+    { x: 1, y: Infinity },
+    { x: "1", y: 1 },
+    { x: 1, y: 1, captureId: "" },
+  ])
+    assert.throws(() =>
+      validateRemoteRequest({
+        tool: "click_at",
+        args: { sessionId: "s", captureId: "c", ...args },
+      }),
+    );
+});

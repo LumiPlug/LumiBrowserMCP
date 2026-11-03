@@ -977,6 +977,8 @@ async function handleRequest(tool, args) {
   if (tool === "list_sessions") return { sessions: list() };
   if (
     ![
+      "screenshot",
+      "click_at",
       "navigate",
       "reload",
       "snapshot",
@@ -996,6 +998,120 @@ async function handleRequest(tool, args) {
     );
   return enqueue(s, async (epoch) => {
     await guard(s, epoch);
+    if (tool === "screenshot") {
+      s.capture = null;
+      const viewport = await page(s, "viewport");
+      if (
+        viewport.scale !== 1 ||
+        viewport.offsetX !== 0 ||
+        viewport.offsetY !== 0
+      )
+        throw new LumiError(
+          "unsupported_viewport",
+          "Reset pinch zoom before capturing.",
+        );
+      const image = await cdp(s, epoch, "Page.captureScreenshot", {
+        format: "jpeg",
+        quality: 70,
+        fromSurface: true,
+        captureBeyondViewport: false,
+        clip: {
+          x: viewport.scrollX,
+          y: viewport.scrollY,
+          width: viewport.width,
+          height: viewport.height,
+          scale: 1 / viewport.dpr,
+        },
+      });
+      await guard(s, epoch);
+      if (
+        JSON.stringify(viewport) !== JSON.stringify(await page(s, "viewport"))
+      )
+        throw new LumiError(
+          "stale_capture",
+          "Viewport changed during capture.",
+        );
+      if (image.data.length > 700000)
+        throw new LumiError(
+          "capture_too_large",
+          "Reduce the browser window size and capture again.",
+        );
+      const captureId = crypto.randomUUID();
+      s.capture = { captureId, viewport, epoch, created: Date.now() };
+      return {
+        captureId,
+        width: viewport.width,
+        height: viewport.height,
+        viewport,
+        mimeType: "image/jpeg",
+        data: image.data,
+      };
+    }
+    if (tool === "click_at") {
+      const capture = s.capture;
+      s.capture = null;
+      const check = async () => {
+        await guard(s, epoch);
+        if (
+          !capture ||
+          capture.captureId !== args.captureId ||
+          capture.epoch !== epoch ||
+          Date.now() - capture.created > 30000 ||
+          JSON.stringify(capture.viewport) !==
+            JSON.stringify(await page(s, "viewport"))
+        )
+          throw new LumiError(
+            "stale_capture",
+            "Capture again before clicking.",
+          );
+      };
+      await check();
+      if (
+        ![args.x, args.y].every(
+          (n) => typeof n === "number" && Number.isFinite(n) && n >= 0,
+        ) ||
+        args.x >= capture.viewport.width ||
+        args.y >= capture.viewport.height
+      )
+        throw new LumiError(
+          "invalid_argument",
+          "Coordinates must be inside the screenshot.",
+        );
+      let emitted = false;
+      try {
+        emitted = true;
+        await cdp(s, epoch, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: args.x,
+          y: args.y,
+        });
+        await check();
+        await cdp(s, epoch, "Input.dispatchMouseEvent", {
+          type: "mousePressed",
+          x: args.x,
+          y: args.y,
+          button: "left",
+          clickCount: 1,
+        });
+        await cdp(s, epoch, "Input.dispatchMouseEvent", {
+          type: "mouseReleased",
+          x: args.x,
+          y: args.y,
+          button: "left",
+          clickCount: 1,
+        });
+        return { dispatched: true };
+      } catch (error) {
+        if (emitted) {
+          await holdTab(s, "paused").catch(() => {});
+          throw new LumiError(
+            "outcome_unknown",
+            "Input may have executed. Inspect and explicitly resume; never retry automatically.",
+          );
+        }
+        throw error;
+      }
+    }
     if (tool === "navigate" || tool === "reload") {
       assertLive(s, epoch);
       if (tool === "reload") await chrome.tabs.reload(s.tabId);

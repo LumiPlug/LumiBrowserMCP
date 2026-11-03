@@ -41,6 +41,32 @@ export function pageOperation(operation, args = {}) {
       overlay: null,
     };
   }
+  if (operation === "viewport") {
+    if (!registry.viewportTracking) {
+      registry.viewportTracking = true;
+      registry.viewportRevision = 0;
+      const changed = () => {
+        registry.viewportRevision++;
+      };
+      addEventListener("scroll", changed, true);
+      addEventListener("resize", changed);
+      visualViewport?.addEventListener("resize", changed);
+      visualViewport?.addEventListener("scroll", changed);
+    }
+    return {
+      url: location.href,
+      documentId: registry.prefix,
+      revision: registry.viewportRevision,
+      width: innerWidth,
+      height: innerHeight,
+      scrollX,
+      scrollY,
+      scale: visualViewport?.scale ?? 1,
+      offsetX: visualViewport?.offsetLeft ?? 0,
+      offsetY: visualViewport?.offsetTop ?? 0,
+      dpr: devicePixelRatio,
+    };
+  }
   const fail = (code, message) => ({ error: { code, message } });
   const visible = (el) => {
     if (!el?.isConnected) return false;
