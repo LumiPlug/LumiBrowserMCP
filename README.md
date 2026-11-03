@@ -65,3 +65,7 @@ node fixtures/server.mjs
 ## 标签页导航
 
 `Lumi.browser_open_tab({url})` 在后台新建标签页。`Lumi.browser_navigate({sessionId, url})` 在指定标签页打开网址，`Lumi.browser_reload({sessionId})` 刷新该页。目标必须是允许的 HTTP(S) 网址。返回 dispatched 表示 Chrome 已接收操作；加载后重新列出会话并获取快照。结果未知时不得自动重试。需要同时更新 Lumi Core 和扩展。
+
+## 网页截图与坐标点击
+
+`Lumi.browser_screenshot({sessionId})` 返回 JPEG 图片和 captureId。图片左上角为原点，坐标单位为 CSS 像素，图片尺寸等于视口尺寸。`Lumi.browser_click_at({sessionId, captureId, x, y})` 执行一次左键点击。截图标识一次性使用，30 秒后过期；导航、滚动、窗口尺寸及缩放变化使截图失效。网页动态内容可能变化，点击后重新观察。截图过大时缩小窗口重试。页面暂停、接管及禁止规则仍生效，结果未知的输入禁止自动重试。仅支持网页可视区域。需要 Lumi 与扩展同时升级至提供这两个工具的版本。

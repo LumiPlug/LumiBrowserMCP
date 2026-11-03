@@ -47,6 +47,8 @@ export function invalidate(session, state) {
 }
 
 export const TOOL_NAMES = [
+  "screenshot",
+  "click_at",
   "open_tab",
   "navigate",
   "reload",
@@ -72,6 +74,8 @@ export function validateRemoteRequest(message) {
   if (!args || typeof args !== "object" || Array.isArray(args))
     throw new LumiError("invalid_argument", "args must be a JSON object.");
   const fields = {
+    screenshot: ["sessionId"],
+    click_at: ["sessionId", "captureId", "x", "y"],
     open_tab: ["url"],
     navigate: ["url", "sessionId"],
     reload: ["sessionId"],
@@ -87,6 +91,19 @@ export function validateRemoteRequest(message) {
     throw new LumiError("invalid_argument", "Unknown tool argument.");
   if (new TextEncoder().encode(JSON.stringify(args)).length > 512 * 1024)
     throw new LumiError("invalid_argument", "Tool arguments exceed 512 KiB.");
+  if (
+    message.tool === "click_at" &&
+    (typeof args.captureId !== "string" ||
+      !args.captureId ||
+      args.captureId.length > 256 ||
+      ![args.x, args.y].every(
+        (n) => typeof n === "number" && Number.isFinite(n) && n >= 0,
+      ))
+  )
+    throw new LumiError(
+      "invalid_argument",
+      "A captureId and finite nonnegative coordinates are required.",
+    );
   if (fields.includes("url")) {
     if (typeof args.url !== "string" || args.url.length > 2048)
       throw new LumiError("invalid_argument", "Invalid navigation URL.");
