@@ -43,7 +43,6 @@ export function createCorePort({ storage }) {
     incomingCount = 0,
     incomingBytes = 0,
     draining = false,
-    needsPersistence = false,
     credentialWrite = Promise.resolve();
   const outgoing = [];
   const port = {
@@ -120,7 +119,7 @@ export function createCorePort({ storage }) {
     if (message.type === "auth_error") {
       close(
         message.code === "pairing_required"
-          ? "配对凭据不匹配；请在扩展与 Lumi 两端明确重新配对；之后按首次信任自动登记。"
+          ? "请升级 Lumi 和 Lumi Browser 后重试本机连接。"
           : "Lumi 暂未接受连接，请检查连接设置。",
       );
       return;
@@ -171,7 +170,6 @@ export function createCorePort({ storage }) {
       )
         throw new Error("Unaccepted pairing");
       credential = { secret: pairing.secret, pairingId: pairing.id };
-      needsPersistence = true;
       if (closed) return;
       await authenticate();
       return;
@@ -185,20 +183,10 @@ export function createCorePort({ storage }) {
           message.proof,
         ))
       ) {
-        close("配对凭据验证失败；请确认正确的 Lumi 后，在两端明确重新配对。");
+        close("本机临时连接校验失败，将重新连接。");
         return;
       }
       if (closed) return;
-      if (needsPersistence) {
-        credentialWrite = credentialPersistence = credentialPersistence
-          .catch(() => {})
-          .then(() => {
-            if (!closed) return storage.set({ [CREDENTIAL_KEY]: credential });
-          });
-        await credentialWrite;
-        needsPersistence = false;
-        if (closed) return;
-      }
       channel = await createSecureChannel(
         credential.secret,
         clientNonce,
@@ -234,26 +222,16 @@ export function createCorePort({ storage }) {
     incoming = incoming
       .then(async () => {
         await storage.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
-        const saved = (await storage.get(CREDENTIAL_KEY))[CREDENTIAL_KEY];
+        // Old persisted pins no longer participate in connection establishment.
+        await resetCorePairing(storage);
         if (closed) return;
-        if (saved !== undefined) {
-          if (
-            !saved ||
-            !/^[A-Za-z0-9_-]{43}$/.test(saved.secret || "") ||
-            !/^[A-Za-z0-9_-]{43}$/.test(saved.pairingId || "")
-          )
-            throw new Error("Invalid stored credential");
-          credential = saved;
-          await authenticate();
-        } else {
-          const hello = await createPairingHello("client");
-          if (closed) return;
-          pairing = { state: hello.state, hello: hello.hello };
-          const commitment = await commitPairingHello(hello.hello, "client");
-          if (closed) return;
-          state = "commit";
-          send({ type: "enroll_commit", commitment });
-        }
+        const hello = await createPairingHello("client");
+        if (closed) return;
+        pairing = { state: hello.state, hello: hello.hello };
+        const commitment = await commitPairingHello(hello.hello, "client");
+        if (closed) return;
+        state = "commit";
+        send({ type: "enroll_commit", commitment });
       })
       .catch(() => close("无法建立受保护的 Lumi 连接。"));
   });

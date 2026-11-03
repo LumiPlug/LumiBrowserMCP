@@ -40,16 +40,10 @@ async function refresh(probe = false) {
         : "允许此页"
       : "禁止此页";
   $("toggle").disabled = busy || !ready || !currentUrl || !status.hostGranted;
-  if (!ready && /配对凭据|重新配对/.test(status.transportError || "")) {
-    $("toggle").textContent = "重新配对";
-    $("toggle").disabled = busy;
-  }
   $("connection").textContent = !ready
     ? status.connecting
       ? "正在连接 Lumi…"
-      : /配对凭据/.test(status.transportError || "")
-        ? "Lumi 未连接 · 配对凭据不匹配"
-        : "Lumi 未连接"
+      : "Lumi 未连接"
     : !currentUrl
       ? "Lumi 已连接 · 此页不支持"
       : held
@@ -65,42 +59,7 @@ async function refresh(probe = false) {
                 : "Lumi 已连接";
 }
 $("toggle").addEventListener("click", async () => {
-  if (
-    !busy &&
-    !lastStatus?.connected &&
-    /配对凭据|重新配对/.test(lastStatus?.transportError || "")
-  ) {
-    if (
-      !window.confirm(
-        "清除此扩展的旧配对凭据并断开？还需在 Lumi 中确认重新配对，之后会重新首次信任，无法识别本机恶意冒充。",
-      )
-    )
-      return;
-    busy = true;
-    $("toggle").disabled = true;
-    showError();
-    try {
-      await request({ type: "reset_pairing", confirmed: true });
-    } catch (error) {
-      showError(error.message);
-    } finally {
-      busy = false;
-      try {
-        await refresh();
-      } catch {
-        $("toggle").disabled = true;
-      }
-    }
-    return;
-  }
-  if (
-    busy ||
-    !lastStatus?.connected ||
-    !lastStatus?.policyReady ||
-    !lastStatus?.hostGranted ||
-    !currentUrl
-  )
-    return;
+  if (busy || !lastStatus?.connected || !lastStatus?.policyReady || !lastStatus?.hostGranted || !currentUrl) return;
   busy = true;
   $("toggle").disabled = true;
   showError();
