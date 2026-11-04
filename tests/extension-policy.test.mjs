@@ -116,7 +116,8 @@ async function setup({
       attach: async (target) => attached.push({ ...target }),
       detach: async (target) => detached.push({ ...target }),
       sendCommand: async (...args) => {
-        commands.push(args);
+        // Page.enable observes dialogs; it is not page input.
+        if (args[1] !== "Page.enable") commands.push(args);
         return {};
       },
     },
@@ -933,4 +934,183 @@ test("persisted safety failure remains fail closed independently of obsolete con
   await env.ready();
   assert.equal((await env.active()).length, 0);
   assert.equal((await env.status()).autoConsent, false);
+});
+
+test("activate focuses only the authorized tab and its window; close uses the same session", async () => {
+  const env = await setup({ tabs: [{ ...normalTab(1), windowId: 7 }] });
+  await env.ready();
+  const calls = [];
+  env.chrome.tabs.update = async (...args) => calls.push(["tab", ...args]);
+  env.chrome.windows = {
+    update: async (...args) => calls.push(["window", ...args]),
+  };
+  env.chrome.tabs.remove = async (id) => calls.push(["remove", id]);
+  const sessionId = (await env.active())[0].id;
+  assert.equal(
+    (await env.nativeRequest("activate_tab", { sessionId })).result.dispatched,
+    true,
+  );
+  assert.deepEqual(calls, [
+    ["tab", 1, { active: true }],
+    ["window", 7, { focused: true }],
+  ]);
+  assert.equal(
+    (await env.nativeRequest("close_tab", { sessionId })).result.dispatched,
+    true,
+  );
+  assert.deepEqual(calls.at(-1), ["remove", 1]);
+  await env.policy(2, ["https://example.test/orders"]);
+  assert.ok((await env.nativeRequest("activate_tab", { sessionId }, 2)).error);
+  assert.equal(calls.length, 3);
+});
+
+test("history refuses blocked and absent destinations before dispatch", async () => {
+  const env = await setup();
+  await env.ready();
+  const sessionId = (await env.active())[0].id;
+  const sent = [];
+  env.chrome.debugger.sendCommand = async (_, method, args) => {
+    sent.push([method, args]);
+    return {
+      currentIndex: 1,
+      entries: [
+        { id: 1, url: "chrome://settings/" },
+        { id: 2, url: "https://example.test/orders" },
+        { id: 3, url: "https://example.test/next" },
+      ],
+    };
+  };
+  assert.equal(
+    (await env.nativeRequest("go_back", { sessionId })).error.code,
+    "blocked_url",
+  );
+  assert.equal(
+    sent.filter((x) => x[0] === "Page.navigateToHistoryEntry").length,
+    0,
+  );
+  assert.equal(
+    (await env.nativeRequest("go_forward", { sessionId })).result.dispatched,
+    true,
+  );
+  assert.deepEqual(sent.at(-1), [
+    "Page.navigateToHistoryEntry",
+    { entryId: 3 },
+  ]);
+});
+
+test("hover sends no click, double right click preserves click counts, and unsupported keys are refused", async () => {
+  const env = await setup();
+  await env.ready();
+  const sessionId = (await env.active())[0].id;
+  const args = { sessionId, ref: "fixture-ref" };
+  assert.equal(
+    (await env.nativeRequest("hover", args)).result.dispatched,
+    true,
+  );
+  assert.equal(
+    env.commands.filter(
+      (x) =>
+        x[1] === "Input.dispatchMouseEvent" && x[2].type === "mousePressed",
+    ).length,
+    0,
+  );
+  assert.equal(
+    (
+      await env.nativeRequest("click", {
+        ...args,
+        button: "right",
+        clickCount: 2,
+      })
+    ).result.dispatched,
+    true,
+  );
+  const presses = env.commands.filter(
+    (x) => x[1] === "Input.dispatchMouseEvent" && x[2].type === "mousePressed",
+  );
+  assert.deepEqual(
+    presses.map((x) => [x[2].button, x[2].clickCount]),
+    [
+      ["right", 1],
+      ["right", 2],
+    ],
+  );
+  assert.ok(
+    (await env.nativeRequest("press_key", { ...args, key: "Meta+L" })).error,
+  );
+});
+
+test("foreground failure is outcome_unknown and never opens a duplicate tab", async () => {
+  const env = await setup();
+  await env.ready();
+  let creates = 0;
+  env.chrome.tabs.create = async (options) => {
+    creates++;
+    assert.equal(options.active, true);
+    return { id: 2, windowId: 1 };
+  };
+  env.chrome.windows = {
+    update: async () => {
+      throw new Error("lost response");
+    },
+  };
+  assert.equal(
+    (
+      await env.nativeRequest("open_tab", {
+        url: "https://example.test/",
+        active: true,
+      })
+    ).error.code,
+    "outcome_unknown",
+  );
+  assert.equal(creates, 1);
+});
+
+test("press_key focuses the ref and sends paired Shift+Tab events without a mouse click", async () => {
+  const env = await setup();
+  await env.ready();
+  const original = env.chrome.scripting.executeScript;
+  env.chrome.scripting.executeScript = async (request) =>
+    request.args[0] === "check_focus"
+      ? [{ result: { focused: true } }]
+      : original(request);
+  const sessionId = (await env.active())[0].id;
+  const result = await env.nativeRequest("press_key", {
+    sessionId,
+    ref: "fixture-ref",
+    key: "Tab",
+    shift: true,
+  });
+  assert.equal(result.result.dispatched, true);
+  assert.deepEqual(
+    env.commands
+      .filter((x) => x[1] === "Input.dispatchKeyEvent")
+      .map((x) => [x[2].type, x[2].key, x[2].modifiers]),
+    [
+      ["keyDown", "Tab", 8],
+      ["keyUp", "Tab", 8],
+    ],
+  );
+  assert.ok(env.pageOps.some((x) => x.op === "focus"));
+  assert.equal(
+    env.commands.filter((x) => x[2].type === "mousePressed").length,
+    0,
+  );
+});
+
+test("set_checked does not toggle a state that is already satisfied", async () => {
+  const env = await setup();
+  await env.ready();
+  const original = env.chrome.scripting.executeScript;
+  env.chrome.scripting.executeScript = async (request) =>
+    request.args[0] === "checked_state"
+      ? [{ result: { checked: true } }]
+      : original(request);
+  const sessionId = (await env.active())[0].id;
+  const result = await env.nativeRequest("set_checked", {
+    sessionId,
+    ref: "fixture-ref",
+    checked: true,
+  });
+  assert.deepEqual(result.result, { dispatched: false, checked: true });
+  assert.equal(env.commands.length, 0);
 });

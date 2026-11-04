@@ -1,3 +1,5 @@
+import { untilDialog } from "./dialog.mjs";
+import { createAdvanced } from "./advanced.mjs";
 import {
   LumiError,
   originOf,
@@ -12,6 +14,14 @@ import { createCorePort, resetCorePairing } from "./transport.mjs";
 let resettingPairing = false;
 
 const sessions = new Map();
+const advanced = createAdvanced({
+  sessions,
+  guard,
+  cdp,
+  page,
+  allowedUrl,
+  holdTab,
+});
 let corePort = null;
 let coreReady = false;
 let handshakeAlarm = null;
@@ -777,20 +787,22 @@ function openCorePort() {
   publish();
 }
 async function page(s, operation, args = {}) {
-  const results = await chrome.scripting.executeScript({
-    target: { tabId: s.tabId, frameIds: [0] },
-    world: "ISOLATED",
-    func: pageOperation,
-    args: [
-      operation,
-      {
-        ...args,
-        expectedOrigin: s.origin,
-        expectedUrl: s.url,
-        sessionToken: s.id,
-      },
-    ],
-  });
+  const results = await untilDialog(s, () =>
+    chrome.scripting.executeScript({
+      target: { tabId: s.tabId, frameIds: [0] },
+      world: "ISOLATED",
+      func: pageOperation,
+      args: [
+        operation,
+        {
+          ...args,
+          expectedOrigin: s.origin,
+          expectedUrl: s.url,
+          sessionToken: s.id,
+        },
+      ],
+    }),
+  );
   const value = results[0]?.result;
   if (!value)
     throw new LumiError(
@@ -852,9 +864,14 @@ async function cdp(s, epoch, method, params) {
     s.policyEpoch !== policy.epoch
   )
     throw new LumiError("policy_changed", "Policy changed before dispatch.");
-  return chrome.debugger.sendCommand({ tabId: s.tabId }, method, params);
+  const invoke = () =>
+    chrome.debugger.sendCommand({ tabId: s.tabId }, method, params);
+  return method === "Page.handleJavaScriptDialog"
+    ? invoke()
+    : untilDialog(s, invoke);
 }
 function revoke(s, state = "revoked") {
+  advanced.forget(s);
   invalidate(s, state);
   page(s, "remove_overlay").catch(() => {});
   attachmentSlots.delete(s.tabId);
@@ -946,6 +963,7 @@ async function attachAllowedTab(tabId) {
         "cancelled",
         "Connection changed during authorization; authorize again.",
       );
+    await advanced.attach(s, s.epoch);
     publish();
     return describe(s);
   } catch (e) {
@@ -970,13 +988,35 @@ async function handleRequest(tool, args) {
         "Invalid or blocked navigation target.",
       );
     if (tool === "open_tab") {
-      await chrome.tabs.create({ url: new URL(args.url).href, active: false });
+      const tab = await chrome.tabs.create({
+        url: new URL(args.url).href,
+        active: args.active ?? false,
+      });
+      if (args.active && Number.isInteger(tab.windowId)) {
+        try {
+          await chrome.windows.update(tab.windowId, { focused: true });
+        } catch {
+          throw new LumiError(
+            "outcome_unknown",
+            "Tab created, but window focus was not confirmed. Do not reopen automatically.",
+          );
+        }
+      }
       return { dispatched: true };
     }
   }
   if (tool === "list_sessions") return { sessions: list() };
   if (
+    !advanced.handles(tool) &&
     ![
+      "activate_tab",
+      "close_tab",
+      "go_back",
+      "go_forward",
+      "hover",
+      "press_key",
+      "select_option",
+      "set_checked",
       "screenshot",
       "click_at",
       "navigate",
@@ -998,6 +1038,56 @@ async function handleRequest(tool, args) {
     );
   return enqueue(s, async (epoch) => {
     await guard(s, epoch);
+    if (advanced.handles(tool)) return advanced.run(tool, s, epoch, args);
+    if (["activate_tab", "close_tab", "go_back", "go_forward"].includes(tool)) {
+      let dispatched = false;
+      try {
+        if (tool === "activate_tab") {
+          const tab = await chrome.tabs.get(s.tabId);
+          await guard(s, epoch);
+          dispatched = true;
+          await chrome.tabs.update(s.tabId, { active: true });
+          await guard(s, epoch);
+          await chrome.windows.update(tab.windowId, { focused: true });
+        } else if (tool === "close_tab") {
+          await guard(s, epoch);
+          dispatched = true;
+          await chrome.tabs.remove(s.tabId);
+        } else {
+          const history = await cdp(s, epoch, "Page.getNavigationHistory", {});
+          const entry =
+            history.entries[
+              history.currentIndex + (tool === "go_back" ? -1 : 1)
+            ];
+          if (!entry)
+            throw new LumiError(
+              "no_history",
+              "No history entry in this direction.",
+            );
+          if (!allowedUrl(entry.url))
+            throw new LumiError(
+              "blocked_url",
+              "History destination is not allowed.",
+            );
+          await guard(s, epoch);
+          dispatched = true;
+          await cdp(s, epoch, "Page.navigateToHistoryEntry", {
+            entryId: entry.id,
+          });
+        }
+        return { dispatched: true };
+      } catch (error) {
+        if (error.code === "dialog_opened") throw error;
+        if (dispatched) {
+          await holdTab(s, "paused").catch(() => {});
+          throw new LumiError(
+            "outcome_unknown",
+            "Tab operation may have occurred; inspect before continuing, never retry automatically.",
+          );
+        }
+        throw error;
+      }
+    }
     if (tool === "screenshot") {
       s.capture = null;
       const viewport = await page(s, "viewport");
@@ -1102,6 +1192,7 @@ async function handleRequest(tool, args) {
         });
         return { dispatched: true };
       } catch (error) {
+        if (error.code === "dialog_opened") throw error;
         if (emitted) {
           await holdTab(s, "paused").catch(() => {});
           throw new LumiError(
@@ -1186,6 +1277,11 @@ async function handleRequest(tool, args) {
     let emitted = false;
     try {
       await page(s, "validate", { ...args, action: tool });
+      if (
+        tool === "set_checked" &&
+        (await page(s, "checked_state", args)).checked === args.checked
+      )
+        return { dispatched: false, checked: args.checked };
       await guard(s, epoch);
       // scrollIntoView may fire page scroll handlers even before a click.
       if (args.ref) emitted = true;
@@ -1204,7 +1300,53 @@ async function handleRequest(tool, args) {
       // Once a mutating CDP command is sent, a transport error may mean it executed.
       // Never retry it automatically. The next call must be an observation.
       emitted = true;
-      if (tool === "scroll") {
+      if (tool === "hover") {
+        return { dispatched: true, point };
+      } else if (tool === "select_option") {
+        const result = await page(s, "select_option", { ...args, ...point });
+        await guard(s, epoch);
+        return result;
+      } else if (tool === "press_key") {
+        await page(s, "focus", args);
+        await guard(s, epoch);
+        if (!(await page(s, "check_focus", args)).focused)
+          throw new LumiError("focus_changed", "Target did not retain focus.");
+        const codes = {
+          Enter: 13,
+          Tab: 9,
+          Escape: 27,
+          Backspace: 8,
+          Delete: 46,
+          ArrowLeft: 37,
+          ArrowRight: 39,
+          ArrowUp: 38,
+          ArrowDown: 40,
+          Home: 36,
+          End: 35,
+          PageUp: 33,
+          PageDown: 34,
+          Space: 32,
+        };
+        const key = {
+          key: args.key === "Space" ? " " : args.key,
+          code: args.key,
+          windowsVirtualKeyCode: codes[args.key],
+          modifiers: args.shift ? 8 : 0,
+        };
+        await cdp(s, epoch, "Input.dispatchKeyEvent", {
+          type: "keyDown",
+          ...key,
+          ...(args.key === "Enter"
+            ? { text: "\r" }
+            : args.key === "Space"
+              ? { text: " " }
+              : {}),
+        });
+        await cdp(s, epoch, "Input.dispatchKeyEvent", {
+          type: "keyUp",
+          ...key,
+        });
+      } else if (tool === "scroll") {
         await cdp(s, epoch, "Input.dispatchMouseEvent", {
           type: "mouseWheel",
           ...point,
@@ -1212,18 +1354,37 @@ async function handleRequest(tool, args) {
           deltaY,
         });
       } else {
-        await cdp(s, epoch, "Input.dispatchMouseEvent", {
-          type: "mousePressed",
-          ...point,
-          button: "left",
-          clickCount: 1,
-        });
-        await cdp(s, epoch, "Input.dispatchMouseEvent", {
-          type: "mouseReleased",
-          ...point,
-          button: "left",
-          clickCount: 1,
-        });
+        if (
+          tool === "set_checked" &&
+          (await page(s, "checked_state", args)).checked === args.checked
+        )
+          return { dispatched: true, checked: args.checked };
+        for (
+          let count = 1;
+          count <= (tool === "click" ? (args.clickCount ?? 1) : 1);
+          count++
+        ) {
+          await cdp(s, epoch, "Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            ...point,
+            button: args.button ?? "left",
+            clickCount: count,
+          });
+          await cdp(s, epoch, "Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            ...point,
+            button: args.button ?? "left",
+            clickCount: count,
+          });
+        }
+        if (tool === "set_checked") {
+          await guard(s, epoch);
+          if ((await page(s, "checked_state", args)).checked !== args.checked)
+            throw new LumiError(
+              "state_not_reached",
+              "Checked state did not reach the requested value.",
+            );
+        }
         if (tool === "fill") {
           await guard(s, epoch);
           if (!(await page(s, "check_focus", args)).focused)
@@ -1270,6 +1431,7 @@ async function handleRequest(tool, args) {
         note: "Input dispatched; inspect a fresh snapshot to confirm the page outcome.",
       };
     } catch (e) {
+      if (e.code === "dialog_opened") throw e;
       if (emitted) {
         if (s.state === "active") {
           await holdTab(s, "paused").catch(() => {});
@@ -1285,6 +1447,15 @@ async function handleRequest(tool, args) {
       }
       throw e;
     }
+  }).catch((error) => {
+    if (error.code === "dialog_opened")
+      return {
+        dispatched: true,
+        dialogPending: true,
+        interrupted: true,
+        note: "Inspect and explicitly handle the dialog. Remaining action steps were not executed; do not repeat automatically.",
+      };
+    throw error;
   });
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {

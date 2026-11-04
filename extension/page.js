@@ -162,11 +162,33 @@ export function pageOperation(operation, args = {}) {
       (el.scrollWidth > el.clientWidth && /auto|scroll/.test(style.overflowX))
     );
   };
+  const hitAt = (x, y) => {
+    let el = document.elementFromPoint(x, y);
+    for (let depth = 0; el?.shadowRoot && depth < 20; depth++) {
+      const inner = el.shadowRoot.elementFromPoint?.(x, y);
+      if (!inner || inner === el) break;
+      el = inner;
+    }
+    return el;
+  };
   const state = (el) => ({
+    inputType: el.tagName === "INPUT" ? el.type : undefined,
     scrollable: isScrollable(el),
     disabled: !!el.disabled || el.getAttribute("aria-disabled") === "true",
     checked: "checked" in el ? !!el.checked : el.getAttribute("aria-checked"),
     expanded: el.getAttribute("aria-expanded"),
+    ...(el.tagName === "SELECT"
+      ? {
+          multiple: !!el.multiple,
+          options: [...el.options].slice(0, 100).map((o) => ({
+            value: o.value,
+            label: o.label,
+            selected: o.selected,
+            disabled: !!o.disabled || !!o.parentElement?.disabled,
+          })),
+          optionsTruncated: el.options.length > 100,
+        }
+      : {}),
     value:
       el.type === "password"
         ? "[redacted]"
@@ -178,9 +200,21 @@ export function pageOperation(operation, args = {}) {
     registry.generation++;
     registry.refs.clear();
     const controlSelector =
-      'a,button,input,textarea,select,[role],[onclick],[tabindex],[contenteditable="true"],summary';
+      'a,button,input,textarea,select,table,[role],[onclick],[tabindex],[contenteditable="true"],summary';
     const interactive = [...document.querySelectorAll(controlSelector)];
     const elements = [...document.querySelectorAll("*")].slice(0, 20000);
+    for (let i = 0; i < elements.length && i < 20000; i++) {
+      const shadow = elements[i].shadowRoot;
+      if (shadow) {
+        interactive.push(...shadow.querySelectorAll(controlSelector));
+        elements.push(
+          ...[...shadow.querySelectorAll("*")].slice(
+            0,
+            20000 - elements.length,
+          ),
+        );
+      }
+    }
     // Delegated menus often attach one listener to a container. Expose the
     // individual text target so the normal hit-test and CDP click can bubble.
     const menuLabels = elements.filter((el) => {
@@ -215,7 +249,9 @@ export function pageOperation(operation, args = {}) {
       return isScrollable(el);
     });
     const nodes = [...new Set([...interactive, ...menuLabels, ...scrollable])]
-      .filter(visible)
+      .filter(
+        (el) => visible(el) || (el.tagName === "INPUT" && el.type === "file"),
+      )
       .slice(0, 500);
     const fullText = document.body?.innerText || "";
     const reasons = [];
@@ -228,8 +264,8 @@ export function pageOperation(operation, args = {}) {
       controls: [],
       truncated: false,
       truncationReasons: reasons,
-      scope: "main_frame_light_dom",
-      unsupported: ["iframes", "closed_shadow_roots", "canvas_targets"],
+      scope: "document_and_open_shadow_dom",
+      unsupported: ["closed_shadow_roots", "canvas_targets"],
       contentTrust: "untrusted_page_data",
     };
     // Budget UTF-8 bytes rather than JS characters (Chinese can use 3 bytes).
@@ -320,7 +356,7 @@ export function pageOperation(operation, args = {}) {
               [0.5, 0.2, 0.8].map((y) => [innerWidth * x, innerHeight * y]),
             );
       for (const [x, y] of candidates) {
-        let hit = document.elementFromPoint(x, y),
+        let hit = hitAt(x, y),
           nested = false;
         if (!hit) continue;
         for (
@@ -376,6 +412,37 @@ export function pageOperation(operation, args = {}) {
         "not_scrollable",
         "Use a scroll_region ref for a container scroll.",
       );
+    if (args.action === "select_option") {
+      if (el.tagName !== "SELECT")
+        return fail("not_select", "Use a native select ref.");
+      if (!el.multiple && new Set(args.values).size !== 1)
+        return fail("invalid_argument", "Single select requires one value.");
+      for (const value of args.values) {
+        const options = [...el.options].filter((o) => o.value === value);
+        if (
+          !options.length ||
+          options.some((o) => o.disabled || o.parentElement?.disabled)
+        )
+          return fail("invalid_option", "Option missing or disabled.");
+      }
+    }
+    if (args.action === "set_checked") {
+      const native =
+        el.tagName === "INPUT" && ["checkbox", "radio"].includes(el.type);
+      const aria = ["checkbox", "radio", "switch"].includes(
+        el.getAttribute("role"),
+      );
+      if (!native && !aria)
+        return fail("not_checkable", "Use a checkbox, radio or switch ref.");
+      if (
+        (el.type === "radio" || el.getAttribute("role") === "radio") &&
+        !args.checked
+      )
+        return fail(
+          "invalid_argument",
+          "Select another radio instead of clearing a radio.",
+        );
+    }
     if (operation === "validate") return { ok: true };
     if (operation === "prepare")
       el.scrollIntoView({
@@ -390,7 +457,7 @@ export function pageOperation(operation, args = {}) {
       Math.max(0, Math.min(innerHeight, r.bottom)) / 2 + Math.max(0, r.top) / 2;
     if (x <= 0 || y <= 0 || x >= innerWidth || y >= innerHeight)
       return fail("not_visible", "Target lies outside the viewport.");
-    const hit = document.elementFromPoint(x, y);
+    const hit = hitAt(x, y);
     if (!(hit === el || el.contains(hit)))
       return fail("obstructed", "Another element covers the target.");
     if (args.action === "scroll") {
@@ -412,9 +479,237 @@ export function pageOperation(operation, args = {}) {
       );
     return { x, y };
   }
+  if (["focus", "checked_state", "select_option"].includes(operation)) {
+    const el = get(args.ref);
+    if (!el?.isConnected) return fail("stale_ref", "Target changed.");
+    if (!visible(el) || state(el).disabled)
+      return fail("disabled", "Target unavailable.");
+    if (operation === "checked_state") {
+      const checked = state(el).checked;
+      return {
+        checked:
+          checked === true || checked === "true"
+            ? true
+            : checked === false || checked === "false"
+              ? false
+              : null,
+      };
+    }
+    if (operation === "focus") {
+      el.focus({ preventScroll: true });
+      return { ok: true };
+    }
+    if (el.tagName !== "SELECT")
+      return fail("not_select", "Use a native select ref.");
+    const verified = pageOperation("verify", {
+      ...args,
+      action: "select_option",
+    });
+    if (verified.error) return verified;
+    const values = new Set(args.values);
+    if (!el.multiple && values.size !== 1)
+      return fail("invalid_argument", "Single select requires one value.");
+    for (const value of values) {
+      const options = [...el.options].filter((o) => o.value === value);
+      if (
+        !options.length ||
+        options.some((o) => o.disabled || o.parentElement?.disabled)
+      )
+        return fail("invalid_option", "Option missing or disabled.");
+    }
+    const unchanged = [...el.options].every(
+      (o) => o.selected === values.has(o.value),
+    );
+    if (unchanged) return { dispatched: false, values: [...values] };
+    for (const option of el.options) option.selected = values.has(option.value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    return {
+      dispatched: true,
+      values: [...el.selectedOptions].map((o) => o.value),
+    };
+  }
+  if (operation === "document_state")
+    return { url: location.href, readyState: document.readyState };
+  if (operation === "ref_state") {
+    const el = get(args.ref);
+    return {
+      present: !!el?.isConnected,
+      visible: visible(el),
+      enabled: !!el?.isConnected && visible(el) && !state(el).disabled,
+    };
+  }
+  if (operation === "capture_bounds") {
+    if (!args.ref)
+      return {
+        x: 0,
+        y: 0,
+        width: Math.max(document.documentElement.scrollWidth, innerWidth),
+        height: Math.max(document.documentElement.scrollHeight, innerHeight),
+        dpr: devicePixelRatio,
+      };
+    const el = get(args.ref);
+    if (!el || !visible(el)) return fail("stale_ref", "Element unavailable");
+    const r = el.getBoundingClientRect();
+    return {
+      x: r.x + scrollX,
+      y: r.y + scrollY,
+      width: r.width,
+      height: r.height,
+      dpr: devicePixelRatio,
+    };
+  }
+  if (operation === "file_marker") {
+    const el = get(args.ref);
+    if (
+      !el?.isConnected ||
+      el.tagName !== "INPUT" ||
+      el.type !== "file" ||
+      el.disabled
+    )
+      return fail("not_file_input", "Use a current file input ref");
+    if (el.webkitdirectory || (!el.multiple && args.count > 1))
+      return fail(
+        "invalid_argument",
+        "File count or directory input unsupported",
+      );
+    // Exact current element, in an isolated world; marker is removed after CDP attachment.
+    const marker = "lumi-upload-" + crypto.randomUUID();
+    el.setAttribute("data-lumi-upload", marker);
+    return { marker };
+  }
+  if (operation === "remove_file_marker") {
+    const el = get(args.ref);
+    if (el?.getAttribute("data-lumi-upload") === args.marker)
+      el.removeAttribute("data-lumi-upload");
+    return { ok: true };
+  }
+  if (operation === "extract_table") {
+    const table = get(args.ref);
+    if (
+      !table?.isConnected ||
+      !(
+        table.tagName === "TABLE" ||
+        ["table", "grid", "treegrid"].includes(table.getAttribute("role"))
+      )
+    )
+      return fail("not_table", "Use a table or ARIA grid ref");
+    const rows = [...table.querySelectorAll("tr,[role=row]")].filter(
+      (row) =>
+        row.closest("table,[role=table],[role=grid],[role=treegrid]") === table,
+    );
+    const offset = args.offset || 0,
+      limit = args.limit || 100;
+    const result = rows.slice(offset, offset + limit).map((row) =>
+      [
+        ...row.querySelectorAll(
+          "th,td,[role=cell],[role=gridcell],[role=columnheader],[role=rowheader]",
+        ),
+      ]
+        .filter((cell) => cell.closest("tr,[role=row]") === row)
+        .slice(0, 100)
+        .map((cell) => ({
+          text: (cell.innerText || cell.textContent || "").slice(0, 1000),
+          header:
+            cell.tagName === "TH" ||
+            cell.getAttribute("role") === "columnheader",
+          links: [...cell.querySelectorAll("a[href]")]
+            .slice(0, 5)
+            .flatMap((a) => {
+              try {
+                const u = new URL(a.href);
+                return ["http:", "https:"].includes(u.protocol) &&
+                  !u.username &&
+                  !u.password
+                  ? [
+                      {
+                        text: a.textContent.slice(0, 200),
+                        url: u.href.slice(0, 2048),
+                      },
+                    ]
+                  : [];
+              } catch {
+                return [];
+              }
+            }),
+        })),
+    );
+    while (new TextEncoder().encode(JSON.stringify(result)).length > 250000)
+      result.pop();
+    return {
+      rows: result,
+      offset,
+      totalLoadedRows: rows.length,
+      nextOffset:
+        offset + result.length < rows.length ? offset + result.length : null,
+      scope: "loaded_dom_only",
+      contentTrust: "untrusted_page_data",
+    };
+  }
+  if (operation === "frame_perform") {
+    const action = args.action;
+    if (action === "snapshot" || action === "read_text")
+      return pageOperation(action, args);
+    if (
+      !["click", "hover", "fill", "select_option", "set_checked"].includes(
+        action,
+      )
+    )
+      return fail("invalid_argument", "Unsupported frame action");
+    const validated = pageOperation("validate", { ...args, action });
+    if (validated.error) return validated;
+    const point = pageOperation("prepare", { ...args, action });
+    if (point.error) return point;
+    const el = get(args.ref);
+    if (!el) return fail("stale_ref", "Target changed");
+    if (action === "select_option")
+      return pageOperation("select_option", { ...args, ...point });
+    if (action === "click") el.click();
+    if (action === "hover") {
+      el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      el.dispatchEvent(new MouseEvent("mouseenter"));
+    }
+    if (action === "set_checked") {
+      const current = pageOperation("checked_state", args).checked;
+      if (current !== args.checked) el.click();
+      if (pageOperation("checked_state", args).checked !== args.checked)
+        return fail(
+          "outcome_unknown",
+          "Checkbox state was not confirmed; inspect before continuing",
+        );
+    }
+    if (action === "fill") {
+      el.focus();
+      if (el.isContentEditable) el.textContent = args.text;
+      else {
+        const prototype =
+          el.tagName === "TEXTAREA"
+            ? HTMLTextAreaElement.prototype
+            : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(prototype, "value").set.call(
+          el,
+          args.text,
+        );
+      }
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    return {
+      dispatched: true,
+      inputMode: "dom_events",
+      note: "DOM events are synthetic; inspect a fresh snapshot.",
+    };
+  }
   if (operation === "check_focus") {
     const el = get(args.ref);
-    return { focused: !!el?.isConnected && document.activeElement === el };
+    let active = document.activeElement;
+    for (
+      let depth = 0;
+      active?.shadowRoot?.activeElement && depth < 20;
+      depth++
+    )
+      active = active.shadowRoot.activeElement;
+    return { focused: !!el?.isConnected && active === el };
   }
   return fail("invalid_operation", "Unsupported page operation.");
 }
