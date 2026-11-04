@@ -1,3 +1,4 @@
+import { validateAdvanced } from "./advanced-validation.mjs";
 export class LumiError extends Error {
   constructor(code, message, details) {
     super(message);
@@ -47,6 +48,14 @@ export function invalidate(session, state) {
 }
 
 export const TOOL_NAMES = [
+  "activate_tab",
+  "close_tab",
+  "go_back",
+  "go_forward",
+  "hover",
+  "press_key",
+  "select_option",
+  "set_checked",
   "screenshot",
   "click_at",
   "open_tab",
@@ -61,6 +70,35 @@ export const TOOL_NAMES = [
   "wait_for",
 ];
 export function validateRemoteRequest(message) {
+  if (message.tool === "artifact_chunk") {
+    const a = message.args;
+    if (
+      !a ||
+      Object.keys(a).some(
+        (k) => !["sessionId", "artifactId", "offset"].includes(k),
+      ) ||
+      typeof a.sessionId !== "string" ||
+      a.sessionId.length > 256 ||
+      typeof a.artifactId !== "string" ||
+      a.artifactId.length > 256 ||
+      !Number.isInteger(a.offset) ||
+      a.offset < 0
+    )
+      throw new LumiError("invalid_argument", "Invalid artifact request");
+    return a;
+  }
+  const advanced = validateAdvanced(message.tool, message.args);
+  if (advanced !== undefined) {
+    if (
+      !advanced ||
+      new TextEncoder().encode(JSON.stringify(message.args)).length > 512 * 1024
+    )
+      throw new LumiError(
+        "invalid_argument",
+        "Invalid advanced tool arguments",
+      );
+    return message.args;
+  }
   if (
     typeof message.tool !== "string" ||
     message.tool.length > 32 ||
@@ -74,15 +112,23 @@ export function validateRemoteRequest(message) {
   if (!args || typeof args !== "object" || Array.isArray(args))
     throw new LumiError("invalid_argument", "args must be a JSON object.");
   const fields = {
+    activate_tab: ["sessionId"],
+    close_tab: ["sessionId"],
+    go_back: ["sessionId"],
+    go_forward: ["sessionId"],
+    hover: ["sessionId", "ref"],
+    press_key: ["sessionId", "ref", "key", "shift"],
+    select_option: ["sessionId", "ref", "values"],
+    set_checked: ["sessionId", "ref", "checked"],
     screenshot: ["sessionId"],
     click_at: ["sessionId", "captureId", "x", "y"],
-    open_tab: ["url"],
+    open_tab: ["url", "active"],
     navigate: ["url", "sessionId"],
     reload: ["sessionId"],
     list_sessions: [],
     snapshot: ["sessionId"],
     read_text: ["sessionId", "ref"],
-    click: ["sessionId", "ref"],
+    click: ["sessionId", "ref", "button", "clickCount"],
     fill: ["sessionId", "ref", "text"],
     scroll: ["sessionId", "ref", "deltaX", "deltaY"],
     wait_for: ["sessionId", "ref", "text", "state", "timeoutMs"],
@@ -104,6 +150,66 @@ export function validateRemoteRequest(message) {
       "invalid_argument",
       "A captureId and finite nonnegative coordinates are required.",
     );
+
+  for (const key of ["active", "shift", "checked"])
+    if (args[key] !== undefined && typeof args[key] !== "boolean")
+      throw new LumiError("invalid_arguments", `Invalid ${key}`);
+  if (message.tool === "set_checked" && typeof args.checked !== "boolean")
+    throw new LumiError("invalid_arguments", "checked is required");
+  if (
+    message.tool === "press_key" &&
+    ![
+      "Enter",
+      "Tab",
+      "Escape",
+      "Backspace",
+      "Delete",
+      "ArrowLeft",
+      "ArrowRight",
+      "ArrowUp",
+      "ArrowDown",
+      "Home",
+      "End",
+      "PageUp",
+      "PageDown",
+      "Space",
+    ].includes(args.key)
+  )
+    throw new LumiError("invalid_arguments", "Unsupported page key");
+  if (
+    message.tool === "select_option" &&
+    (!Array.isArray(args.values) ||
+      args.values.length < 1 ||
+      args.values.length > 100 ||
+      args.values.some((v) => typeof v !== "string" || v.length > 10000))
+  )
+    throw new LumiError(
+      "invalid_arguments",
+      "Provide 1–100 bounded option values",
+    );
+  if (
+    args.button !== undefined &&
+    !["left", "right", "middle"].includes(args.button)
+  )
+    throw new LumiError("invalid_arguments", "Invalid mouse button");
+  if (
+    args.clickCount !== undefined &&
+    args.clickCount !== 1 &&
+    args.clickCount !== 2
+  )
+    throw new LumiError("invalid_arguments", "Invalid click count");
+  if (
+    [
+      "click",
+      "fill",
+      "hover",
+      "press_key",
+      "select_option",
+      "set_checked",
+    ].includes(message.tool) &&
+    (typeof args.ref !== "string" || !args.ref)
+  )
+    throw new LumiError("invalid_argument", "A current ref is required.");
   if (fields.includes("url")) {
     if (typeof args.url !== "string" || args.url.length > 2048)
       throw new LumiError("invalid_argument", "Invalid navigation URL.");

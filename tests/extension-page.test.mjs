@@ -245,3 +245,113 @@ test("a delegated menu label gets its own guarded click reference", (t) => {
     "stale_ref",
   );
 });
+
+test("native select exposes options and rejects disabled values before changing state", (t) => {
+  const events = [];
+  const select = {
+    ...el,
+    tagName: "SELECT",
+    innerText: "Choice",
+    multiple: false,
+    options: [
+      { value: "a", label: "A", selected: true },
+      { value: "b", label: "B", selected: false },
+      { value: "c", label: "C", disabled: true, selected: false },
+    ],
+    get selectedOptions() {
+      return this.options.filter((o) => o.selected);
+    },
+    dispatchEvent(e) {
+      events.push(e.type);
+    },
+    getAttribute: () => null,
+    contains(node) {
+      return node === this;
+    },
+  };
+  t.mock.method(document, "querySelectorAll", () => [select]);
+  t.mock.method(document, "elementFromPoint", () => select);
+  const control = pageOperation("snapshot").controls[0];
+  assert.equal(control.state.options.length, 3);
+  assert.equal(
+    pageOperation("validate", {
+      ref: control.ref,
+      action: "select_option",
+      values: ["c"],
+    }).error.code,
+    "invalid_option",
+  );
+  assert.deepEqual(events, []);
+  assert.deepEqual(
+    pageOperation("select_option", { ref: control.ref, values: ["b"] }),
+    { dispatched: true, values: ["b"] },
+  );
+  assert.deepEqual(events, ["input", "change"]);
+  assert.equal(
+    pageOperation("select_option", { ref: control.ref, values: ["b"] })
+      .dispatched,
+    false,
+  );
+});
+
+test("checked-state validation rejects unrelated controls and preserves indeterminate ARIA state", (t) => {
+  const checkbox = {
+    ...el,
+    tagName: "DIV",
+    innerText: "Choice",
+    getAttribute: (k) =>
+      k === "role" ? "checkbox" : k === "aria-checked" ? "mixed" : null,
+    contains(node) {
+      return node === this;
+    },
+  };
+  t.mock.method(document, "querySelectorAll", () => [checkbox]);
+  t.mock.method(document, "elementFromPoint", () => checkbox);
+  const ref = pageOperation("snapshot").controls[0].ref;
+  assert.equal(pageOperation("checked_state", { ref }).checked, null);
+  assert.deepEqual(
+    pageOperation("validate", { ref, action: "set_checked", checked: false }),
+    { ok: true },
+  );
+  checkbox.getAttribute = () => null;
+  const other = pageOperation("snapshot").controls[0].ref;
+  assert.equal(
+    pageOperation("validate", {
+      ref: other,
+      action: "set_checked",
+      checked: true,
+    }).error.code,
+    "not_checkable",
+  );
+});
+
+test("open shadow controls are discovered and keyboard focus follows the shadow active element", (t) => {
+  const input = {
+    ...el,
+    tagName: "INPUT",
+    type: "text",
+    innerText: "",
+    value: "fixture",
+    getAttribute: (k) => (k === "aria-label" ? "Shadow input" : null),
+    contains(n) {
+      return n === this;
+    },
+  };
+  const root = {
+    querySelectorAll: () => [input],
+    elementFromPoint: () => input,
+    activeElement: input,
+  };
+  const host = { ...el, tagName: "DIV", shadowRoot: root };
+  t.mock.method(document, "querySelectorAll", (selector) =>
+    selector === "*" ? [host] : [],
+  );
+  t.mock.method(document, "elementFromPoint", () => host);
+  document.activeElement = host;
+  const ref = pageOperation("snapshot").controls[0].ref;
+  assert.deepEqual(pageOperation("check_focus", { ref }), { focused: true });
+  assert.deepEqual(pageOperation("prepare", { ref, action: "click" }), {
+    x: 60,
+    y: 40,
+  });
+});

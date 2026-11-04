@@ -167,3 +167,19 @@ test("coordinate clicks require a capture and bounded numeric arguments", () => 
       }),
     );
 });
+
+test("common action arguments reject malformed states, refs and unbounded inputs", () => {
+  for (const [tool, args] of [
+    ["set_checked", { sessionId: "s", ref: "r", checked: "false" }],
+    ["select_option", { sessionId: "s", ref: "r", values: [] }],
+    [
+      "select_option",
+      { sessionId: "s", ref: "r", values: ["x".repeat(10001)] },
+    ],
+    ["hover", { sessionId: "s" }],
+    ["press_key", { sessionId: "s", ref: "r", key: "F12" }],
+    ["click", { sessionId: "s", ref: "r", clickCount: 3 }],
+    ["open_tab", { url: "https://example.test", active: "yes" }],
+  ])
+    assert.throws(() => validateRemoteRequest({ tool, args }));
+});
